@@ -1,0 +1,6 @@
+{
+  "provider": { "name": "Counter-Strike 2", "appid": 730, "steamid": "76561198000000001", "timestamp": 1700000010 },
+  "map": { "mode": "competitive", "name": "de_mirage", "phase": "warmup", "round": 0, "team_ct": { "score": 0 }, "team_t": { "score": 0 } },
+  "round": { "phase": "freezetime" },
+  "player": { "steamid": "76561198000000001", "activity": "playing", "state": { "health": 100, "round_kills": 0, "round_killhs": 0 }, "match_stats": { "kills": 0, "deaths": 0 } }
+}

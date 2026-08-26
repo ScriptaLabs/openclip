@@ -168,6 +168,30 @@ pub struct RecordingStatus {
     pub message: Option<String>,
 }
 
+/// One atomic set of domain changes produced from a game-state transition.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameStateUpdate {
+    #[serde(default)]
+    pub sessions: Vec<GameSession>,
+    #[serde(default)]
+    pub matches: Vec<Match>,
+    #[serde(default)]
+    pub rounds: Vec<Round>,
+    #[serde(default)]
+    pub events: Vec<GameEvent>,
+}
+
+impl GameStateUpdate {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+            && self.matches.is_empty()
+            && self.rounds.is_empty()
+            && self.events.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

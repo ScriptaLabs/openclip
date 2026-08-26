@@ -1,0 +1,4 @@
+{
+  "provider": { "name": "Counter-Strike 2", "appid": 730, "timestamp": 1700000300 },
+  "previously": { "player": { "match_stats": { "kills": 2 } } }
+}

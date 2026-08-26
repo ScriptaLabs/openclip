@@ -1,21 +1,20 @@
-//! Counter-Strike 2 integration boundary.
+//! Counter-Strike 2 Game State Integration.
 //!
-//! The GSI listener, config installer, and state-diff adapter belong here in Milestone 2. Keeping
-//! this crate free of capture dependencies guarantees that gameplay detection cannot become
-//! coupled to Windows frame acquisition.
+//! This crate owns CS2 payload parsing, state interpretation, loopback HTTP transport, and GSI
+//! configuration discovery. It depends only on generic `OpenClip` domain contracts and never on
+//! capture or UI code.
 
-/// Settings owned specifically by the CS2 Game State Integration adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GsiEndpoint {
-    pub host: String,
-    pub port: u16,
-}
+pub mod adapter;
+pub mod installer;
+pub mod listener;
+pub mod models;
+pub mod service;
 
-impl Default for GsiEndpoint {
-    fn default() -> Self {
-        Self {
-            host: "127.0.0.1".to_owned(),
-            port: 21_987,
-        }
-    }
-}
+pub use adapter::Cs2Adapter;
+pub use installer::{
+    ConfigInstallAction, ConfigInstallResult, Cs2Install, GSI_CONFIG_FILE_NAME, SteamLocator,
+    install_gsi_config, render_gsi_config,
+};
+pub use listener::{GsiEndpoint, GsiPayloadHandler, ListenerError, serve};
+pub use models::{Cs2ConnectionState, Cs2Status, GsiPayload};
+pub use service::GsiService;

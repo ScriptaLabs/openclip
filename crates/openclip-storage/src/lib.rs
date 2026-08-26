@@ -5,8 +5,8 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use openclip_core::{
-    GameEvent, GameEventId, GameSession, GameSessionId, Match, MatchId, MatchRepository, Moment,
-    MomentId, OpenClipError, Round, RoundId, Settings,
+    GameEvent, GameEventId, GameSession, GameSessionId, GameStateUpdate, Match, MatchId,
+    MatchRepository, Moment, MomentId, OpenClipError, Round, RoundId, Settings,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
@@ -208,85 +208,19 @@ impl MatchRepository for SqliteRepository {
     }
 
     fn save_session(&mut self, session: &GameSession) -> openclip_core::Result<()> {
-        self.connection
-            .execute(
-                "INSERT INTO sessions (id, game, started_at, ended_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at",
-                params![
-                    session.id.to_string(),
-                    json_enum(session.game)?,
-                    session.started_at.to_rfc3339(),
-                    session.ended_at.map(|value| value.to_rfc3339()),
-                ],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        write_session(&self.connection, session)
     }
 
     fn save_match(&mut self, game_match: &Match) -> openclip_core::Result<()> {
-        self.connection
-            .execute(
-                "INSERT INTO matches
-                 (id, session_id, map, mode, started_at, ended_at, score_team_a, score_team_b)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(id) DO UPDATE SET map = excluded.map, mode = excluded.mode,
-                   ended_at = excluded.ended_at, score_team_a = excluded.score_team_a,
-                   score_team_b = excluded.score_team_b",
-                params![
-                    game_match.id.to_string(),
-                    game_match.session_id.to_string(),
-                    game_match.map,
-                    json_enum(game_match.mode)?,
-                    game_match.started_at.to_rfc3339(),
-                    game_match.ended_at.map(|value| value.to_rfc3339()),
-                    game_match.score_team_a,
-                    game_match.score_team_b,
-                ],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        write_match(&self.connection, game_match)
     }
 
     fn save_round(&mut self, round: &Round) -> openclip_core::Result<()> {
-        self.connection
-            .execute(
-                "INSERT INTO rounds (id, match_id, number, started_at, ended_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at",
-                params![
-                    round.id.to_string(),
-                    round.match_id.to_string(),
-                    round.number,
-                    round.started_at.to_rfc3339(),
-                    round.ended_at.map(|value| value.to_rfc3339()),
-                ],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        write_round(&self.connection, round)
     }
 
     fn save_event(&mut self, event: &GameEvent) -> openclip_core::Result<()> {
-        let match_offset_ms = event.match_offset_ms.map(to_sql_integer).transpose()?;
-        self.connection
-            .execute(
-                "INSERT INTO events
-                 (id, match_id, round_id, source_game, event_type, occurred_at,
-                  match_offset_ms, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(id) DO UPDATE SET metadata_json = excluded.metadata_json",
-                params![
-                    event.id.to_string(),
-                    event.match_id.to_string(),
-                    event.round_id.map(|id| id.to_string()),
-                    json_enum(event.source_game)?,
-                    json_enum(event.event_type)?,
-                    event.occurred_at.to_rfc3339(),
-                    match_offset_ms,
-                    event.metadata.to_string(),
-                ],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        write_event(&self.connection, event)
     }
 
     fn save_moment(&mut self, moment: &Moment) -> openclip_core::Result<()> {
@@ -364,6 +298,108 @@ impl MatchRepository for SqliteRepository {
             .map_err(storage_error)?;
         Ok(())
     }
+
+    fn apply_game_update(&mut self, update: &GameStateUpdate) -> openclip_core::Result<()> {
+        if update.is_empty() {
+            return Ok(());
+        }
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        for session in &update.sessions {
+            write_session(&transaction, session)?;
+        }
+        for game_match in &update.matches {
+            write_match(&transaction, game_match)?;
+        }
+        for round in &update.rounds {
+            write_round(&transaction, round)?;
+        }
+        for event in &update.events {
+            write_event(&transaction, event)?;
+        }
+        transaction.commit().map_err(storage_error)
+    }
+}
+
+fn write_session(connection: &Connection, session: &GameSession) -> openclip_core::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO sessions (id, game, started_at, ended_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at",
+            params![
+                session.id.to_string(),
+                json_enum(session.game)?,
+                session.started_at.to_rfc3339(),
+                session.ended_at.map(|value| value.to_rfc3339()),
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn write_match(connection: &Connection, game_match: &Match) -> openclip_core::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO matches
+             (id, session_id, map, mode, started_at, ended_at, score_team_a, score_team_b)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET map = excluded.map, mode = excluded.mode,
+               ended_at = excluded.ended_at, score_team_a = excluded.score_team_a,
+               score_team_b = excluded.score_team_b",
+            params![
+                game_match.id.to_string(),
+                game_match.session_id.to_string(),
+                game_match.map,
+                json_enum(game_match.mode)?,
+                game_match.started_at.to_rfc3339(),
+                game_match.ended_at.map(|value| value.to_rfc3339()),
+                game_match.score_team_a,
+                game_match.score_team_b,
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn write_round(connection: &Connection, round: &Round) -> openclip_core::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO rounds (id, match_id, number, started_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at",
+            params![
+                round.id.to_string(),
+                round.match_id.to_string(),
+                round.number,
+                round.started_at.to_rfc3339(),
+                round.ended_at.map(|value| value.to_rfc3339()),
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn write_event(connection: &Connection, event: &GameEvent) -> openclip_core::Result<()> {
+    let match_offset_ms = event.match_offset_ms.map(to_sql_integer).transpose()?;
+    connection
+        .execute(
+            "INSERT INTO events
+             (id, match_id, round_id, source_game, event_type, occurred_at,
+              match_offset_ms, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET metadata_json = excluded.metadata_json",
+            params![
+                event.id.to_string(),
+                event.match_id.to_string(),
+                event.round_id.map(|id| id.to_string()),
+                json_enum(event.source_game)?,
+                json_enum(event.event_type)?,
+                event.occurred_at.to_rfc3339(),
+                match_offset_ms,
+                event.metadata.to_string(),
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 fn map_match_row(row: &Row<'_>) -> rusqlite::Result<Match> {

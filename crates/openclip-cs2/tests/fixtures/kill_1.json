@@ -1,0 +1,7 @@
+{
+  "provider": { "name": "Counter-Strike 2", "appid": 730, "steamid": "76561198000000001", "timestamp": 1700000030 },
+  "map": { "mode": "competitive", "name": "de_mirage", "phase": "live", "round": 0, "team_ct": { "score": 0 }, "team_t": { "score": 0 } },
+  "round": { "phase": "live" },
+  "player": { "steamid": "76561198000000001", "activity": "playing", "state": { "health": 76, "round_kills": 1, "round_killhs": 1 }, "match_stats": { "kills": 1, "deaths": 0 }, "weapons": { "weapon_0": { "name": "weapon_ak47", "type": "Rifle", "state": "active", "ammo_clip": 24 } } },
+  "previously": { "player": { "state": { "round_kills": 0, "round_killhs": 0 }, "match_stats": { "kills": 0 } } }
+}

@@ -7,7 +7,10 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::{GameEvent, GameSession, Match, MatchId, Moment, RecordingStatus, Round, Settings};
+use crate::{
+    GameEvent, GameSession, GameStateUpdate, Match, MatchId, Moment, RecordingStatus, Round,
+    Settings,
+};
 
 #[derive(Debug, Error)]
 pub enum OpenClipError {
@@ -25,7 +28,7 @@ pub type Result<T> = std::result::Result<T, OpenClipError>;
 
 /// Converts one game's native state payloads into game-agnostic events.
 pub trait GameAdapter: Send {
-    fn process_state(&mut self, data: &[u8]) -> Result<Vec<GameEvent>>;
+    fn process_state(&mut self, data: &[u8]) -> Result<GameStateUpdate>;
 }
 
 /// Owns session/match/round lifecycle without knowing how events were produced.
@@ -64,4 +67,5 @@ pub trait MatchRepository: Send {
     fn save_moment(&mut self, moment: &Moment) -> Result<()>;
     fn load_settings(&self) -> Result<Settings>;
     fn save_settings(&mut self, settings: &Settings) -> Result<()>;
+    fn apply_game_update(&mut self, update: &GameStateUpdate) -> Result<()>;
 }

@@ -1,0 +1,7 @@
+{
+  "provider": { "name": "Counter-Strike 2", "appid": 730, "steamid": "76561198000000001", "timestamp": 1700000090 },
+  "map": { "mode": "competitive", "name": "de_mirage", "phase": "live", "round": 0, "team_ct": { "score": 1 }, "team_t": { "score": 0 } },
+  "round": { "phase": "over", "win_team": "CT" },
+  "player": { "steamid": "76561198000000001", "activity": "playing", "state": { "round_kills": 2, "round_killhs": 1 }, "match_stats": { "kills": 2, "deaths": 0 } },
+  "previously": { "round": { "phase": "live" } }
+}
