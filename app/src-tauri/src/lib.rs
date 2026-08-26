@@ -3,9 +3,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use openclip_capture::{AudioDevice, RecorderService, list_microphone_devices};
 use openclip_core::{
-    GameEventType, GameStateUpdate, Match, MatchId, MatchRepository, Moment, RecordingState,
-    RecordingStatus, Settings,
+    Clip, GameEventType, GameStateUpdate, Match, MatchId, MatchRepository, Moment, RecordingStatus,
+    Settings,
 };
 use openclip_cs2::{
     ConfigInstallResult, Cs2Install, Cs2Status, GSI_CONFIG_FILE_NAME, GsiEndpoint, GsiService,
@@ -14,12 +15,14 @@ use openclip_cs2::{
 use openclip_storage::SqliteRepository;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_global_shortcut::ShortcutState;
 
 type SharedService = Arc<GsiService<SqliteRepository>>;
 
 struct AppState {
     repository: Arc<Mutex<SqliteRepository>>,
     gsi: SharedService,
+    recorder: RecorderService,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,12 +35,42 @@ struct Cs2SetupStatus {
 }
 
 #[tauri::command]
-fn get_recording_status() -> RecordingStatus {
-    RecordingStatus {
-        state: RecordingState::WaitingForGame,
-        game: None,
-        message: Some("Capture is outside the current milestone".to_owned()),
-    }
+fn get_recording_status(state: State<'_, AppState>) -> RecordingStatus {
+    state.recorder.status()
+}
+
+fn save_and_persist_replay(state: &AppState) -> Result<Clip, String> {
+    let clip = state
+        .recorder
+        .save_replay(state.gsi.status().active_match_id)
+        .map_err(|error| error.to_string())?;
+    state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .save_clip(&clip)
+        .map_err(|error| error.to_string())?;
+    Ok(clip)
+}
+
+#[tauri::command]
+fn save_replay(state: State<'_, AppState>) -> Result<Clip, String> {
+    save_and_persist_replay(&state)
+}
+
+#[tauri::command]
+fn get_clips(state: State<'_, AppState>) -> Result<Vec<Clip>, String> {
+    state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .list_clips()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_microphone_devices() -> Result<Vec<AudioDevice>, String> {
+    list_microphone_devices().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -126,7 +159,9 @@ fn update_settings(settings: Settings, state: State<'_, AppState>) -> Result<(),
         .lock()
         .map_err(|_| "database lock was poisoned".to_owned())?
         .save_settings(&settings)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    state.recorder.update_settings(settings);
+    Ok(())
 }
 
 fn emit_game_updates(app: &tauri::AppHandle, update: &GameStateUpdate) {
@@ -181,10 +216,47 @@ pub fn run() {
                 emit_game_updates(&app_handle, update);
             });
             let gsi = Arc::new(GsiService::with_observer(repository.clone(), observer));
+            let recorder = RecorderService::new(
+                &data_dir,
+                repository
+                    .lock()
+                    .map_err(|_| std::io::Error::other("database lock was poisoned"))?
+                    .load_settings()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(AppState {
                 repository,
                 gsi: gsi.clone(),
+                recorder: recorder.clone(),
             });
+
+            app.handle().plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_shortcuts(["F8"])?
+                    .with_handler(|app, _shortcut, event| {
+                        if event.state != ShortcutState::Pressed {
+                            return;
+                        }
+                        let app = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let state = app.state::<AppState>();
+                            match save_and_persist_replay(&state) {
+                                Ok(clip) => {
+                                    tracing::info!(path = %clip.path.display(), "F8 replay save completed");
+                                    if let Err(error) = app.emit("replay_saved", clip) {
+                                        tracing::warn!(%error, "could not emit replay saved event");
+                                    }
+                                }
+                                Err(error) => tracing::warn!(%error, "F8 replay save was not available"),
+                            }
+                        });
+                    })
+                    .build(),
+            )?;
+            recorder
+                .start()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
 
             let handler: Arc<dyn openclip_cs2::GsiPayloadHandler> = gsi.clone();
             tauri::async_runtime::spawn(async move {
@@ -198,6 +270,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_recording_status,
+            save_replay,
+            get_clips,
+            get_microphone_devices,
             get_cs2_status,
             get_cs2_setup_status,
             install_cs2_gsi_config,

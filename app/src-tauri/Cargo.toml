@@ -13,10 +13,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 openclip-core = { path = "../../crates/openclip-core" }
+openclip-capture = { path = "../../crates/openclip-capture" }
 openclip-cs2 = { path = "../../crates/openclip-cs2" }
 openclip-storage = { path = "../../crates/openclip-storage" }
 serde.workspace = true
 tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
