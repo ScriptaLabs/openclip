@@ -39,7 +39,7 @@ GameSession
 ```
 
 A `GameEvent` is game-agnostic and carries optional JSON metadata for facts such as weapon names.
-The CS2 adapter will translate state changes into these events. The core UI and moment engine do not
+The CS2 adapter translates state changes into these events. The core UI and moment engine do not
 need to know the original GSI JSON layout.
 
 A `Moment` is a logical time window rather than a synonym for a video file. Nearby qualifying events
@@ -50,9 +50,11 @@ the event and intended window can survive capture or extraction failure and be r
 
 ### Game adapters
 
-`GameAdapter::process_state` accepts native bytes and emits generic `GameEvent` values. CS2 GSI
-installation, HTTP handling, parsing, and state differencing stay in `openclip-cs2`. That crate must
-not depend on capture code.
+`GameAdapter::process_state` accepts native bytes and emits a `GameStateUpdate` containing the
+sessions, matches, rounds, and generic events changed by one snapshot. CS2 GSI installation, HTTP
+handling, parsing, and state differencing stay in `openclip-cs2`. That crate does not depend on
+capture code. The listener binds an IPv4 loopback address rather than an externally reachable
+interface.
 
 ### Match and moment management
 
@@ -76,17 +78,19 @@ SQLite is authoritative for metadata. The initial migration contains sessions, m
 events, moments, moment-event links, clips, and settings. Foreign keys and delete behavior preserve
 the graph. Video bytes are never stored in SQLite; `clips.path` points to a normal file.
 
-`SqliteRepository` implements the core `MatchRepository` port. Repository tests round-trip a complete
-match graph and settings through an in-memory SQLite database.
+`SqliteRepository` implements the core `MatchRepository` port. One GSI update is applied in a single
+SQLite transaction so event graphs cannot be partially persisted. Repository tests round-trip a
+complete match graph and settings through an in-memory SQLite database, while the CS2 listener test
+posts real HTTP payloads into in-memory persistence.
 
 ### Tauri and React
 
 The Tauri host is intentionally thin: it creates the application data directory, owns the database
 connection, and exposes typed commands. The React application never performs capture.
 
-During Milestone 1, React pages consume an asynchronous `MatchRepository` implemented with typed
-development fixtures. This is a visible development seam, not fake backend behavior. A Tauri IPC
-repository can implement the same frontend interface after GSI writes real matches.
+In the desktop runtime, React pages consume an asynchronous `MatchRepository` implemented with Tauri
+IPC. The host also exposes GSI/setup status and emits `gsi_update` plus match/round lifecycle events.
+Typed fixtures implement the same interface only for the explicit browser development preview.
 
 ## Time and identity
 
@@ -103,4 +107,3 @@ timestamp drift.
 - capture failures must not delete relevant replay segments or metadata;
 - logs are structured at the native boundary;
 - encoded media stays outside SQLite and should use crash-tolerant segmented containers.
-
