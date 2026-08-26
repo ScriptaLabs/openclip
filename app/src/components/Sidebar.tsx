@@ -1,5 +1,4 @@
 import { Clapperboard, Gamepad2, Settings } from "lucide-react";
-import { BrandMark } from "./BrandMark";
 import type { Cs2Status } from "../data/matchRepository";
 import type { RecordingStatus } from "../data/matchRepository";
 import banner from "../../assets/branding/banner.png";
@@ -27,7 +26,6 @@ export function Sidebar({ currentPage, onNavigate, status, recordingStatus }: Si
   return (
     <aside className="sidebar">
       <div className="brand-row">
-        <BrandMark />
         <img className="brand-banner" src={banner} alt="OpenClip" />
       </div>
 
