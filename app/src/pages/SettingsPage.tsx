@@ -1,15 +1,22 @@
 import { useEffect, useState } from "react";
 import { FolderOpen } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   getCs2SetupStatus,
   getMicrophoneDevices,
   getSettings,
   installCs2GsiConfig,
+  setStoragePath,
   updateSettings,
   type AudioDevice,
   type Cs2SetupStatus,
   type RecordingSettings,
 } from "../data/matchRepository";
+
+const displayStoragePath = (path?: string) => {
+  if (!path) return "Loading…";
+  return path.startsWith("\\\\?\\") ? path.slice(4) : path;
+};
 
 export function SettingsPage() {
   const [setup, setSetup] = useState<Cs2SetupStatus | null>(null);
@@ -24,6 +31,10 @@ export function SettingsPage() {
     void getSettings().then(setSettings).catch((error) => setSetupError(String(error)));
     void getMicrophoneDevices().then(setMicrophones).catch((error) => setSetupError(String(error)));
   }, []);
+
+  useEffect(() => {
+    if (settings) document.documentElement.dataset.accent = settings.accent;
+  }, [settings?.accent]);
 
   const save = (next: RecordingSettings) => {
     setSettings(next);
@@ -40,6 +51,16 @@ export function SettingsPage() {
       setSetupError(error instanceof Error ? error.message : String(error));
     } finally {
       setInstalling(false);
+    }
+  };
+
+  const chooseStorage = async () => {
+    setSetupError(null);
+    try {
+      const selected = await open({ directory: true, multiple: false, title: "Choose OpenClip clip location" });
+      if (selected) setSettings(await setStoragePath(selected));
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -69,7 +90,7 @@ export function SettingsPage() {
       </section>
 
       <section className="settings-panel">
-        <div className="settings-heading"><h2>Microphone</h2><p>Choose the preference now; microphone mixing remains disabled in Milestone 3.</p></div>
+        <div className="settings-heading"><h2>Microphone</h2><p>Choose the preference now; microphone mixing remains deferred.</p></div>
         <div className="toggle-list">
           <label className="toggle-row"><span><strong>Capture microphone</strong><small>Saved for the upcoming microphone capture backend</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureMicrophone ?? false} onChange={(event) => settings && save({ ...settings, captureMicrophone: event.target.checked })} /><i /></label>
         </div>
@@ -78,22 +99,32 @@ export function SettingsPage() {
         </div>
       </section>
 
-      <section className="settings-panel disabled-feature-panel">
-        <div className="settings-heading"><h2>Automatic capture</h2><p>Planned for Milestone 4; these controls are intentionally disabled.</p></div>
+      <section className="settings-panel">
+        <div className="settings-heading"><h2>Automatic capture</h2><p>Nearby qualifying events merge until the post-roll window expires.</p></div>
         <div className="toggle-list">
-          {[['Kills', 'Capture eliminations automatically'], ['Headshots', 'Mark precision kills as highlights'], ['Multi-kills', 'Merge nearby kills into one moment']].map(([title, copy]) => (
-            <label className="toggle-row" key={title}><span><strong>{title}</strong><small>{copy}</small></span><input type="checkbox" checked={false} disabled readOnly /><i /></label>
-          ))}
+          <label className="toggle-row"><span><strong>Kills</strong><small>Ordinary kills can create automatic moments</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureKills ?? false} onChange={(event) => settings && save({ ...settings, captureKills: event.target.checked })} /><i /></label>
+          <label className="toggle-row"><span><strong>Headshots</strong><small>Known GSI headshots receive extra importance</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureHeadshots ?? false} onChange={(event) => settings && save({ ...settings, captureHeadshots: event.target.checked })} /><i /></label>
+          <label className="toggle-row"><span><strong>Multi-kills</strong><small>Merge nearby kills within the same round</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureMultiKills ?? false} onChange={(event) => settings && save({ ...settings, captureMultiKills: event.target.checked })} /><i /></label>
         </div>
         <div className="settings-grid compact-settings">
-          <label><span>Before event</span><select disabled value={settings?.preRollSeconds ?? 10}><option>{settings?.preRollSeconds ?? 10} seconds</option></select></label>
-          <label><span>After event</span><select disabled value={settings?.postRollSeconds ?? 5}><option>{settings?.postRollSeconds ?? 5} seconds</option></select></label>
+          <label><span>Before event</span><select disabled={!settings} value={settings?.preRollSeconds ?? 10} onChange={(event) => settings && save({ ...settings, preRollSeconds: Number(event.target.value) })}>{[5, 10, 15].map((seconds) => <option key={seconds} value={seconds}>{seconds} seconds</option>)}</select></label>
+          <label><span>After event</span><select disabled={!settings} value={settings?.postRollSeconds ?? 5} onChange={(event) => settings && save({ ...settings, postRollSeconds: Number(event.target.value) })}>{[3, 5, 8, 10].map((seconds) => <option key={seconds} value={seconds}>{seconds} seconds</option>)}</select></label>
         </div>
       </section>
 
       <section className="settings-panel storage-panel">
         <div className="settings-heading"><h2>Storage</h2><p>Video stays on your machine.</p></div>
-        <div className="path-button"><FolderOpen size={17} /><span>{settings?.storagePath ?? "Loading…"}</span></div>
+        <div className="storage-path-row"><div className="path-button"><FolderOpen size={17} /><span>{displayStoragePath(settings?.storagePath)}</span></div><button className="secondary-button" disabled={!settings} onClick={() => void chooseStorage()} type="button">Change folder</button></div>
+      </section>
+
+      <section className="settings-panel">
+        <div className="settings-heading"><h2>Appearance and behavior</h2><p>Restrained preferences for capture feedback and intentional accents.</p></div>
+        <div className="settings-grid compact-settings">
+          <label><span>Accent</span><select disabled={!settings} value={settings?.accent ?? "mint"} onChange={(event) => settings && save({ ...settings, accent: event.target.value as RecordingSettings["accent"] })}><option value="mint">Mint</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="neutral">Neutral</option></select></label>
+        </div>
+        <div className="toggle-list recording-toggles">
+          <label className="toggle-row"><span><strong>Clip captured notification</strong><small>Show a restrained in-app confirmation after automatic capture</small></span><input disabled={!settings} type="checkbox" checked={settings?.showClipNotifications ?? true} onChange={(event) => settings && save({ ...settings, showClipNotifications: event.target.checked })} /><i /></label>
+        </div>
       </section>
     </div>
   );

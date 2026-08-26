@@ -1,6 +1,9 @@
+import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, Check, ChevronRight, Download, Headphones, Play, Sparkles, Star } from "lucide-react";
 import type { MatchRecord, Moment } from "../domain";
 import { formatMode } from "../domain";
+import { exportInterestingMoments, openMomentClip } from "../data/matchRepository";
 
 interface GameDetailPageProps {
   match: MatchRecord;
@@ -20,8 +23,33 @@ function durationLabel(match: MatchRecord): string {
 }
 
 export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
+  const [exportOpen, setExportOpen] = useState(false);
+  const [destination, setDestination] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
   const mapName = (match.map ?? "Unknown map").replace("de_", "");
   const roundById = new Map(match.rounds.map((round) => [round.id, round]));
+  const capturedMoments = match.moments.filter((moment) => moment.clipPath && (moment.importance >= 10 || moment.isFavorite));
+
+  const chooseExportFolder = async () => {
+    const selected = await open({ directory: true, multiple: false, title: "Export interesting moments" });
+    if (selected) setDestination(selected);
+  };
+
+  const exportMoments = async () => {
+    if (!destination) return;
+    setExporting(true);
+    setMessage(null);
+    try {
+      const paths = await exportInterestingMoments(match.id, destination);
+      setMessage(`${paths.length} ${paths.length === 1 ? "moment" : "moments"} exported`);
+      setExportOpen(false);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div className="page detail-page">
@@ -38,7 +66,7 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
             <span>Today • {durationLabel(match)}</span>
           </div>
         </div>
-        <button className="primary-button" type="button">
+        <button className="primary-button" disabled={capturedMoments.length === 0} onClick={() => setExportOpen(true)} type="button">
           <Download size={17} /> Export interesting moments
         </button>
       </header>
@@ -76,7 +104,7 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
             const round = moment.roundId ? roundById.get(moment.roundId) : undefined;
             const seconds = Math.round((moment.endOffsetMs - moment.startOffsetMs) / 1000);
             return (
-              <button className="highlight-row" key={moment.id} type="button">
+              <button className="highlight-row" disabled={!moment.clipPath} key={moment.id} onClick={() => void openMomentClip(match.id, moment.id).catch((error) => setMessage(String(error)))} type="button">
                 <div className={`moment-thumbnail tone-${moment.thumbnailTone}`}>
                   <div className="thumbnail-grid" />
                   <span className="play-button"><Play size={16} fill="currentColor" /></span>
@@ -91,7 +119,7 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
                   {moment.isFavorite && <Star size={15} fill="currentColor" />}
                   <span>{Math.round(moment.importance)} pts</span>
                 </div>
-                <ChevronRight size={18} className="row-chevron" />
+                {moment.clipPath ? <ChevronRight size={18} className="row-chevron" /> : <small className="clip-unavailable">Clip unavailable</small>}
               </button>
             );
           })}
@@ -124,8 +152,10 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
       </section>
 
       <footer className="capture-note">
-        <Headphones size={15} /> Game events are local metadata. Video capture is not active yet.
+        <Headphones size={15} /> Events and captured video remain local to this computer.
       </footer>
+      {message && <div className="inline-message" role="status">{message}</div>}
+      {exportOpen && <div className="dialog-backdrop" role="presentation"><section aria-labelledby="export-title" aria-modal="true" className="export-dialog" role="dialog"><h2 id="export-title">Export interesting moments</h2><p>{capturedMoments.length} captured {capturedMoments.length === 1 ? "moment" : "moments"} will be copied as separate MP4 files.</p><label><span>Destination</span><button className="path-button" onClick={() => void chooseExportFolder()} type="button"><Download size={16} /><span>{destination ?? "Choose folder"}</span></button></label><div className="dialog-actions"><button className="secondary-button" onClick={() => setExportOpen(false)} type="button">Cancel</button><button className="primary-button" disabled={!destination || exporting} onClick={() => void exportMoments()} type="button">{exporting ? "Exporting…" : "Export"}</button></div></section></div>}
     </div>
   );
 }

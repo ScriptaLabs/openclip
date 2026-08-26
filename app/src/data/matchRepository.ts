@@ -46,6 +46,8 @@ export interface RecordingSettings {
   captureMicrophone: boolean;
   microphoneDeviceId: string | null;
   storagePath: string;
+  accent: "mint" | "blue" | "purple" | "neutral";
+  showClipNotifications: boolean;
 }
 
 export interface AudioDevice {
@@ -73,7 +75,18 @@ function enrichMatch(match: PersistedMatch): MatchRecord {
         ?.metadata.weapon as string | undefined;
       return {
         ...moment,
-        title: moment.classification === "headshot" ? "Headshot" : "Highlight",
+        title: ({
+          kill: "Kill",
+          headshot: "Headshot",
+          double_kill: "Double Kill",
+          triple_kill: "Triple Kill",
+          quad_kill: "Quad Kill",
+          five_kill: "Five Kill",
+          multi_kill: "Multi-kill",
+          clutch: "Clutch",
+          ace: "Ace",
+          other: "Highlight",
+        } as const)[moment.classification],
         weapon: weapon?.replace("weapon_", "") ?? "Unknown weapon",
         thumbnailTone: (["amber", "cyan", "violet", "green"] as const)[index % 4]!,
       };
@@ -153,6 +166,8 @@ const browserSettings: RecordingSettings = {
   captureMicrophone: false,
   microphoneDeviceId: null,
   storagePath: "OpenClip/Clips",
+  accent: "mint",
+  showClipNotifications: true,
 };
 
 export async function getSettings(): Promise<RecordingSettings> {
@@ -165,6 +180,18 @@ export async function updateSettings(settings: RecordingSettings): Promise<void>
 
 export async function getMicrophoneDevices(): Promise<AudioDevice[]> {
   return isTauri() ? invoke<AudioDevice[]>("get_microphone_devices") : [];
+}
+
+export async function setStoragePath(path: string): Promise<RecordingSettings> {
+  return invoke<RecordingSettings>("set_storage_path", { path });
+}
+
+export async function openMomentClip(matchId: string, momentId: string): Promise<void> {
+  await invoke("open_moment_clip", { matchId, momentId });
+}
+
+export async function exportInterestingMoments(matchId: string, destination: string): Promise<string[]> {
+  return invoke<string[]>("export_interesting_moments", { matchId, destination });
 }
 
 export async function getCs2SetupStatus(): Promise<Cs2SetupStatus> {

@@ -59,9 +59,10 @@ function makeMoment(
     startOffsetMs: Math.max(0, firstOffset - 10_000),
     endOffsetMs: firstOffset + 8_000,
     events,
-    classification: events.filter((event) => event.eventType === "kill").length > 1 ? "multi_kill" : "kill",
+    classification: events.filter((event) => event.eventType === "kill").length >= 3 ? "triple_kill" : events.filter((event) => event.eventType === "kill").length === 2 ? "double_kill" : "kill",
     importance: 20 + events.length * 10,
     clipPath: null,
+    clipId: null,
     isFavorite: index === 1,
     title,
     weapon,
@@ -145,4 +146,3 @@ export const developmentMatches: MatchRecord[] = [
   compactMatch("inferno-02", "de_inferno", "premier", [11, 13], "inferno", `${baseDate}T16:20:00Z`, [1, 0, 2, 0, 1, 0, 1, 0]),
   compactMatch("ancient-03", "de_ancient", "competitive", [13, 5], "ancient", "2026-08-25T19:10:00Z", [0, 1, 0, 1, 1, 0, 2, 0]),
 ];
-

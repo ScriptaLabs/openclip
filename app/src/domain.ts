@@ -14,6 +14,10 @@ export type GameEventType =
 export type MomentClassification =
   | "kill"
   | "headshot"
+  | "double_kill"
+  | "triple_kill"
+  | "quad_kill"
+  | "five_kill"
   | "multi_kill"
   | "clutch"
   | "ace"
@@ -48,6 +52,7 @@ export interface Moment {
   events: GameEvent[];
   classification: MomentClassification;
   importance: number;
+  clipId: string | null;
   clipPath: string | null;
   isFavorite: boolean;
   title: string;
@@ -87,4 +92,3 @@ export function getMatchStats(match: MatchRecord): MatchStats {
 export function formatMode(mode: MatchMode): string {
   return mode === "unknown" ? "Unknown mode" : mode[0]!.toUpperCase() + mode.slice(1);
 }
-
