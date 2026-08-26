@@ -9,7 +9,7 @@ visible cs2.exe window
   → independently finalized ~2 s MP4 segment
   → parsed sync-sample gate
   → hard-bounded rolling segment buffer
-  → F8 or save_replay
+  → F8/manual replay or a Moment capture range
   → encoded-sample remux to final MP4
 ```
 
@@ -59,12 +59,23 @@ The rolling buffer is capped by configured duration and a conservative encoded-b
 files are deleted only after leaving the index. Save holds a short pin on selected paths, writes a
 new `.partial` output, parses it, and then renames it to the dated final path.
 
+Segment rollover never closes or opens an encoder on the Windows Graphics Capture frame callback.
+The next Media Foundation encoder is pre-warmed on a worker, and the previous independent MP4 is
+flushed, parsed, and indexed by a serial finalizer worker. This prevents the 150–300 ms frozen-frame
+runs that synchronous encoder startup/finalization caused at two-second boundaries. A resolution
+generation gate prevents a late old-resolution job from entering a newly reset buffer. Ranged saves
+wait on a condition variable until their newest required segment is finalized; they do not poll or
+read an active `.partial` file.
+
+Changing the clip storage folder affects newly saved manual and automatic output. It does not move
+or redirect the active temporary rolling buffer.
+
 ## Diagnostics and validation
 
 Structured native logs report target PID, resolution, FPS target/observed rate, bitrate, encoder
-initialization time, dropped frame count, segment count/bytes, buffered seconds, remux time, and
-errors. `nvidia-smi` can be used during a real recording session to verify an active NVIDIA encoder
-session on the test machine.
+initialization/finalization time, dropped frame count, segment count/bytes, buffered seconds, remux
+time, and errors. `nvidia-smi` can be used during a real recording session to verify an active NVIDIA
+encoder session on the test machine.
 
 Real validation requires CS2 (or a controlled capturable process during backend smoke testing), at
 least 15 seconds of changing content, F8, and playback inspection for picture, duration, corruption,

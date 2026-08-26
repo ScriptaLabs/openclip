@@ -26,6 +26,13 @@ kill. Headshots use the per-round headshot delta when CS2 supplies it.
 Only local-player statistics are accepted: matching provider/player Steam IDs are preferred, with
 `activity: playing` as the fallback for partial payloads.
 
+After each update is transactionally persisted, the Tauri observer forwards its generic
+`GameEvent`s to the automatic moment service. Kill events retain their match/round identity and
+known headshot metadata. The moment layer—not the CS2 adapter—applies capture settings, merge
+windows, classification, and importance scoring. This keeps the replay service game-agnostic and
+prevents a pending moment from crossing a round or match boundary. See
+[`moments.md`](moments.md) for the complete lifecycle.
+
 ## Tests and simulation
 
 Sanitized payloads live in `crates/openclip-cs2/tests/fixtures`. The integration suite starts an

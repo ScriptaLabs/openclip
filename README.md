@@ -9,7 +9,7 @@ separate clip records which can optionally reference the active GSI match.
 
 ## Current milestone
 
-Milestone 3 adds native Windows capture and manual replay saving to the completed CS2 GSI foundation:
+Milestone 4 connects CS2 events to automatic, match-organized highlights:
 
 - Windows Graphics Capture targeting the largest visible `cs2.exe` window
 - GPU-surface input to Windows Media Foundation H.264 with hardware acceleration requested and an
@@ -19,14 +19,20 @@ Milestone 3 adds native Windows capture and manual replay saving to the complete
   segments enter the rolling buffer
 - hard duration and byte bounds, keyframe-safe selection, and encoded-sample MP4 remuxing on save
 - F8 global Save Replay plus the shared `save_replay` Tauri command
-- separate persistent manual clip metadata, including active-match association when GSI has one
+- event-driven moments with configurable pre/post-roll, same-round multi-kill merging, deterministic
+  importance scoring, and delayed finalization
+- ranged, keyframe-safe remuxing into automatic clips linked to their Moment, Round, and Match
+- separate persistent manual and automatic clip sources; F8 remains independent
+- real match-detail highlights/timeline markers, OS playback, and per-match interesting-moment export
+- native validated storage selection used by future manual and automatic clips
 - launch/close/relaunch monitoring, resolution-change reset, and local capture diagnostics
 - persistent quality, resolution, frame-rate, game-audio, and microphone device preferences
-- the supplied OpenClip logo/banner and CS2 artwork, plus restrained accessible navigation states
+- mint/blue/purple/neutral accents and optional restrained clip-captured feedback
+- the supplied banner as the sole sidebar brand and the supplied monochrome app icon
 
-Automatic event-triggered video saving and microphone mixing remain intentionally deferred. The UI
-enumerates active Windows microphone endpoints and persists the enable/device preference without
-claiming that microphone audio is already present in Milestone 3 clips.
+Microphone mixing remains intentionally deferred. The UI enumerates active Windows microphone
+endpoints and persists the enable/device preference without claiming that microphone audio is
+already present in clips.
 
 ## Architecture
 
@@ -99,18 +105,22 @@ game/csgo/cfg/gamestate_integration_openclip.cfg
 Restart CS2 after installing the configuration. See [`docs/cs2-gsi.md`](docs/cs2-gsi.md) for the
 payload contract, diagnostics, and fixture simulation details.
 
-## Save a replay
+## Automatic highlights and manual replay
 
 1. Start the desktop app; capture continues independently of which React page is open.
 2. Launch CS2 in a capturable borderless/fullscreen-windowed or windowed mode.
 3. Wait for the sidebar to show **Replay active**.
-4. Play for at least 15 seconds and press **F8**.
+4. Play normally. Qualifying local-player kills automatically become moments after their post-roll
+   expires. Press **F8** at any time for an independent manual replay.
 
 The app remuxes the most recent finalized segments into a dated MP4 under the configured storage
 path and writes its metadata to SQLite. The in-flight segment is named `*.mp4.partial` and is never
 indexed; an abrupt process termination can lose at most that segment while prior segments remain
 independently parseable and are recovered into the next recorder session. See
 [`docs/capture.md`](docs/capture.md) for limitations and diagnostics.
+
+See [`docs/moments.md`](docs/moments.md) for merge/finalization rules, scoring, persistence, export,
+and capture-unavailable behavior.
 
 ## Validate
 
@@ -131,9 +141,9 @@ SQLite stores metadata only. Captured video remains as ordinary files on disk.
 
 1. **Repository and core domain** — complete
 2. **CS2 GSI listener, installer, state differencing, persistence, and live GUI data** — complete
-3. **Windows capture, hardware H.264, bounded manual replay buffer, and F8 save** — current
-4. automatic merged moments triggered by CS2 events
-5. per-match export of interesting moments
+3. **Windows capture, hardware H.264, bounded manual replay buffer, and F8 save** — complete
+4. **automatic merged moments, ranged extraction, real match UI, export, and desktop polish** — current
+5. montage assembly and editing foundations
 
 OpenClip is licensed under either the MIT License or Apache License 2.0. License files will be added
 before the first public release.

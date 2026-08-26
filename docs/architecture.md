@@ -75,6 +75,10 @@ audio its own monotonic sample clock. No raw-frame replay buffer or capture API 
 The recorder restarts its encoder around every two seconds. An in-progress segment has a `.partial`
 suffix and is not visible to `SegmentReplayBuffer`. After clean encoder finalization the recorder
 parses the MP4, requires a first sync video sample, atomically renames it, and only then indexes it.
+Encoder pre-warming and finalization run on dedicated workers so neither operation stalls the frame
+arrival callback. Finalization remains serial, preserving segment order. The buffer exposes both a
+recent-window selector for F8 and a logical-range selector for automatic moments; a condition
+variable synchronizes ranges whose newest segment is still active.
 The buffer has both duration and byte ceilings. Saving selects a keyframe-safe recent window and
 uses `mp4io` to copy encoded H.264/AAC samples into a new MP4—there is no video decode or re-encode.
 On startup, finalized segments are validated and re-indexed while any interrupted `.partial` is
@@ -83,8 +87,10 @@ rolling window.
 
 ### Storage
 
-SQLite is authoritative for metadata. The initial graph tables remain unchanged; migration 0002
-adds `captured_clips` so manual replays do not require or invent a moment. Video bytes are never
+SQLite is authoritative for metadata. Migration 0002 adds `captured_clips`; migration 0003 adds
+clip-origin relationships without rewriting legacy tables. Manual replays do not require or invent
+a moment. Automatic clip and Moment metadata are committed together when capture succeeds, while a
+logical Moment can still persist without a clip after a capture failure. Video bytes are never
 stored in SQLite.
 
 `SqliteRepository` implements the core `MatchRepository` port. One GSI update is applied in a single
@@ -95,7 +101,9 @@ posts real HTTP payloads into in-memory persistence.
 ### Tauri and React
 
 The Tauri host creates the application data directory, owns the database and recorder, registers F8,
-and exposes typed commands. F8 and `save_replay` call the same recorder operation. The React
+and exposes typed commands. An `AutomaticMomentService` observes persisted generic GSI updates,
+runs the moment timer, and delegates ranged saves to the recorder without teaching capture code what
+a kill is. F8 and `save_replay` call the same independent manual recorder operation. The React
 application never performs capture and does not need to remain focused. Recording controls persist
 quality, resolution, FPS, game-audio, and microphone preferences; microphone endpoint enumeration is
 wired while actual microphone mixing remains a later milestone.
@@ -103,6 +111,8 @@ wired while actual microphone mixing remains a later milestone.
 In the desktop runtime, React pages consume an asynchronous `MatchRepository` implemented with Tauri
 IPC. The host also exposes GSI/setup status and emits `gsi_update` plus match/round lifecycle events.
 Typed fixtures implement the same interface only for the explicit browser development preview.
+Native commands validate/persist storage directories, open only database-resolved clip paths, and
+copy qualifying match moments to deterministic, collision-safe export names.
 
 ## Time and identity
 
