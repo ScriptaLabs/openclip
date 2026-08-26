@@ -1,0 +1,12 @@
+[package]
+name = "openclip-cs2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openclip-core = { path = "../openclip-core" }
+
+[lints]
+workspace = true
+

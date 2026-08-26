@@ -1,0 +1,35 @@
+[workspace]
+members = [
+  "crates/openclip-buffer",
+  "crates/openclip-capture",
+  "crates/openclip-core",
+  "crates/openclip-cs2",
+  "crates/openclip-storage",
+  "app/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/openclip/openclip"
+
+[workspace.dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.23.0", features = ["serde", "v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
