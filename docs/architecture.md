@@ -36,6 +36,9 @@ GameSession
     └── Moment
         ├── GameEvent references
         └── optional Clip file
+
+Clip (manual replay)
+└── optional Match reference
 ```
 
 A `GameEvent` is game-agnostic and carries optional JSON metadata for facts such as weapon names.
@@ -64,19 +67,25 @@ saturating millisecond arithmetic to make pre-roll safe near match start.
 
 ### Capture and replay buffer
 
-`CaptureEngine` exposes lifecycle/status without exposing frames to React. `openclip-capture` defines
-encoded packet, hardware encoder, and audio track concepts. `ReplayBuffer` preserves an encoded
-match-relative window. No raw frame or capture API crosses into the Tauri IPC layer.
+`RecorderService` supervises the CS2 window lifecycle. Windows Graphics Capture delivers Direct3D
+surfaces with system-relative monotonic timestamps directly to a Windows Media Foundation H.264
+transcoder. CS2 process-tree WASAPI loopback supplies 48 kHz stereo PCM; the segment encoder gives
+audio its own monotonic sample clock. No raw-frame replay buffer or capture API crosses Tauri IPC.
 
-The actual Windows capture, hardware encoders, audio, and segmented replay buffer are deferred until
-Milestone 4. Their interfaces exist now to keep orchestration direction explicit, not to simulate
-recording.
+The recorder restarts its encoder around every two seconds. An in-progress segment has a `.partial`
+suffix and is not visible to `SegmentReplayBuffer`. After clean encoder finalization the recorder
+parses the MP4, requires a first sync video sample, atomically renames it, and only then indexes it.
+The buffer has both duration and byte ceilings. Saving selects a keyframe-safe recent window and
+uses `mp4io` to copy encoded H.264/AAC samples into a new MP4—there is no video decode or re-encode.
+On startup, finalized segments are validated and re-indexed while any interrupted `.partial` is
+kept only for diagnostics. Resolution changes finalize the old segment and reset the incompatible
+rolling window.
 
 ### Storage
 
-SQLite is authoritative for metadata. The initial migration contains sessions, matches, rounds,
-events, moments, moment-event links, clips, and settings. Foreign keys and delete behavior preserve
-the graph. Video bytes are never stored in SQLite; `clips.path` points to a normal file.
+SQLite is authoritative for metadata. The initial graph tables remain unchanged; migration 0002
+adds `captured_clips` so manual replays do not require or invent a moment. Video bytes are never
+stored in SQLite.
 
 `SqliteRepository` implements the core `MatchRepository` port. One GSI update is applied in a single
 SQLite transaction so event graphs cannot be partially persisted. Repository tests round-trip a
@@ -85,8 +94,11 @@ posts real HTTP payloads into in-memory persistence.
 
 ### Tauri and React
 
-The Tauri host is intentionally thin: it creates the application data directory, owns the database
-connection, and exposes typed commands. The React application never performs capture.
+The Tauri host creates the application data directory, owns the database and recorder, registers F8,
+and exposes typed commands. F8 and `save_replay` call the same recorder operation. The React
+application never performs capture and does not need to remain focused. Recording controls persist
+quality, resolution, FPS, game-audio, and microphone preferences; microphone endpoint enumeration is
+wired while actual microphone mixing remains a later milestone.
 
 In the desktop runtime, React pages consume an asynchronous `MatchRepository` implemented with Tauri
 IPC. The host also exposes GSI/setup status and emits `gsi_update` plus match/round lifecycle events.
@@ -94,7 +106,7 @@ Typed fixtures implement the same interface only for the explicit browser develo
 
 ## Time and identity
 
-UUID newtypes prevent accidentally mixing session, match, round, event, and moment IDs in Rust.
+UUID newtypes prevent accidentally mixing session, match, round, event, moment, and clip IDs in Rust.
 Absolute timestamps are UTC `DateTime` values. Match-relative video windows use unsigned
 milliseconds; this makes persistence and IPC representations predictable and avoids floating-point
 timestamp drift.

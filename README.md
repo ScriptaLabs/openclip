@@ -4,29 +4,29 @@ OpenClip is a lightweight, local-first automatic game clipping application. It i
 Counter-Strike 2 on Windows 10/11 with no accounts, cloud dependency, advertisements, social feed,
 or telemetry by default.
 
-OpenClip is **match-centric**. A recording belongs to a moment, a moment belongs to a round, and a
-round belongs to a match. The product is designed around reviewing a match and exporting its useful
-moments—not browsing a flat folder of disconnected video files.
+OpenClip is **match-centric**. Automatic moments belong to rounds and matches; manual replays are
+separate clip records which can optionally reference the active GSI match.
 
 ## Current milestone
 
-Milestone 2 adds reliable Counter-Strike 2 Game State Integration to the project foundation:
+Milestone 3 adds native Windows capture and manual replay saving to the completed CS2 GSI foundation:
 
-- Rust workspace with domain, storage, CS2, capture, and replay-buffer boundaries
-- strongly typed sessions, matches, rounds, events, moments, recording status, and settings
-- SQLite migration and repository for persistent metadata
-- window-based moment grouping with configurable pre-roll and post-roll
-- Tauri 2 application shell with React, strict TypeScript, Tailwind CSS, and typed IPC commands
-- a loopback-only Axum listener on `127.0.0.1:21987`
-- partial-tolerant CS2 payload models and stateful match, round, kill, and headshot detection
-- Steam library discovery and an idempotent OpenClip-only GSI config installer
-- transactional persistence from each derived game-state update
-- live Tauri status, setup, match queries, and lifecycle events
-- real persisted matches in the desktop UI, with explicit fixtures only in browser preview
-- match artwork sourced from the provided `app/assets/map_splash` collection
+- Windows Graphics Capture targeting the largest visible `cs2.exe` window
+- GPU-surface input to Windows Media Foundation H.264 with hardware acceleration requested and an
+  NVIDIA driver/NVENC capability gate
+- process-tree WASAPI loopback audio for CS2, encoded as AAC at 48 kHz stereo
+- independently finalized approximately two-second MP4 segments; only parsed, sync-sample-starting
+  segments enter the rolling buffer
+- hard duration and byte bounds, keyframe-safe selection, and encoded-sample MP4 remuxing on save
+- F8 global Save Replay plus the shared `save_replay` Tauri command
+- separate persistent manual clip metadata, including active-match association when GSI has one
+- launch/close/relaunch monitoring, resolution-change reset, and local capture diagnostics
+- persistent quality, resolution, frame-rate, game-audio, and microphone device preferences
+- the supplied OpenClip logo/banner and CS2 artwork, plus restrained accessible navigation states
 
-Video capture, encoding, audio, replay extraction, cloud services, and accounts remain intentionally
-out of scope.
+Automatic event-triggered video saving and microphone mixing remain intentionally deferred. The UI
+enumerates active Windows microphone endpoints and persists the enable/device preference without
+claiming that microphone audio is already present in Milestone 3 clips.
 
 ## Architecture
 
@@ -49,8 +49,8 @@ The Rust crates are deliberately separated:
 | `openclip-core` | Stable domain models, settings, errors, and component ports |
 | `openclip-storage` | SQLite migrations and metadata repository |
 | `openclip-cs2` | CS2 GSI models, adapter, loopback listener, Steam discovery, and config installer |
-| `openclip-buffer` | Moment-window logic now; encoded segment ring/extraction later |
-| `openclip-capture` | Encoder/audio contracts; native Windows implementation later |
+| `openclip-buffer` | Moment windows plus hard-bounded encoded segment retention/selection |
+| `openclip-capture` | Windows target discovery, WGC, H.264/AAC encoding, recovery, and remux |
 | `openclip-app` | Thin Tauri host and typed IPC commands |
 
 See [`docs/architecture.md`](docs/architecture.md) for the dependency rules and design rationale.
@@ -99,6 +99,19 @@ game/csgo/cfg/gamestate_integration_openclip.cfg
 Restart CS2 after installing the configuration. See [`docs/cs2-gsi.md`](docs/cs2-gsi.md) for the
 payload contract, diagnostics, and fixture simulation details.
 
+## Save a replay
+
+1. Start the desktop app; capture continues independently of which React page is open.
+2. Launch CS2 in a capturable borderless/fullscreen-windowed or windowed mode.
+3. Wait for the sidebar to show **Replay active**.
+4. Play for at least 15 seconds and press **F8**.
+
+The app remuxes the most recent finalized segments into a dated MP4 under the configured storage
+path and writes its metadata to SQLite. The in-flight segment is named `*.mp4.partial` and is never
+indexed; an abrupt process termination can lose at most that segment while prior segments remain
+independently parseable and are recovered into the next recorder session. See
+[`docs/capture.md`](docs/capture.md) for limitations and diagnostics.
+
 ## Validate
 
 From the repository root:
@@ -112,17 +125,15 @@ npm run typecheck
 npm run build
 ```
 
-SQLite stores metadata only. Captured video will remain as ordinary files on disk and be linked to
-matches and moments by IDs.
+SQLite stores metadata only. Captured video remains as ordinary files on disk.
 
 ## Roadmap
 
 1. **Repository and core domain** — complete
-2. **CS2 GSI listener, installer, state differencing, persistence, and live GUI data** — current
-3. capture orchestration groundwork
-4. Windows capture with hardware encoding and a manual replay buffer
-5. automatic merged moments triggered by CS2 events
-6. per-match export of interesting moments
+2. **CS2 GSI listener, installer, state differencing, persistence, and live GUI data** — complete
+3. **Windows capture, hardware H.264, bounded manual replay buffer, and F8 save** — current
+4. automatic merged moments triggered by CS2 events
+5. per-match export of interesting moments
 
 OpenClip is licensed under either the MIT License or Apache License 2.0. License files will be added
 before the first public release.
