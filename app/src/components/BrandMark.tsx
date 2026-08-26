@@ -1,9 +1,5 @@
-export function BrandMark() {
-  return (
-    <div className="brand-mark" aria-hidden="true">
-      <span />
-      <span />
-    </div>
-  );
-}
+import logo from "../../assets/branding/logo.png";
 
+export function BrandMark() {
+  return <img className="brand-mark" src={logo} alt="" aria-hidden="true" />;
+}

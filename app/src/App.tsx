@@ -3,7 +3,13 @@ import { Film } from "lucide-react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { MatchRecord } from "./domain";
-import { getCs2Status, matchRepository, type Cs2Status } from "./data/matchRepository";
+import {
+  getCs2Status,
+  getRecordingStatus,
+  matchRepository,
+  type Cs2Status,
+  type RecordingStatus,
+} from "./data/matchRepository";
 import { EmptySection } from "./components/EmptySection";
 import { Sidebar, type Page } from "./components/Sidebar";
 import { GameDetailPage } from "./pages/GameDetailPage";
@@ -15,16 +21,22 @@ function App() {
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [selectedMatch, setSelectedMatch] = useState<MatchRecord | null>(null);
   const [status, setStatus] = useState<Cs2Status | null>(null);
+  const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     const refresh = async () => {
       try {
-        const [nextMatches, nextStatus] = await Promise.all([matchRepository.list(), getCs2Status()]);
+        const [nextMatches, nextStatus, nextRecordingStatus] = await Promise.all([
+          matchRepository.list(),
+          getCs2Status(),
+          getRecordingStatus(),
+        ]);
         if (active) {
           setMatches(nextMatches);
           setStatus(nextStatus);
+          setRecordingStatus(nextRecordingStatus);
           setLoadError(null);
         }
       } catch (error) {
@@ -32,7 +44,10 @@ function App() {
       }
     };
     void refresh();
-    const interval = window.setInterval(() => void getCs2Status().then(setStatus).catch(() => {}), 3_000);
+    const interval = window.setInterval(() => {
+      void getCs2Status().then(setStatus).catch(() => {});
+      void getRecordingStatus().then(setRecordingStatus).catch(() => {});
+    }, 1_000);
     let unlisten: (() => void) | undefined;
     if (isTauri()) {
       void listen("gsi_update", () => void refresh()).then((stop) => { unlisten = stop; });
@@ -74,7 +89,12 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar currentPage={page} onNavigate={navigate} status={status} />
+      <Sidebar
+        currentPage={page}
+        onNavigate={navigate}
+        status={status}
+        recordingStatus={recordingStatus}
+      />
       <main className="main-content">{content}</main>
     </div>
   );

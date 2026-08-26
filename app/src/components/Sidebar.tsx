@@ -1,6 +1,9 @@
 import { Clapperboard, Gamepad2, Settings } from "lucide-react";
 import { BrandMark } from "./BrandMark";
 import type { Cs2Status } from "../data/matchRepository";
+import type { RecordingStatus } from "../data/matchRepository";
+import banner from "../../assets/branding/banner.png";
+import cs2Artwork from "../../assets/games/cs2.jpg";
 
 export type Page = "games" | "montages" | "settings";
 
@@ -8,6 +11,7 @@ interface SidebarProps {
   currentPage: Page;
   onNavigate: (page: Page) => void;
   status: Cs2Status | null;
+  recordingStatus: RecordingStatus | null;
 }
 
 const navigation = [
@@ -15,8 +19,8 @@ const navigation = [
   { id: "montages" as const, label: "Montages", icon: Clapperboard },
 ];
 
-export function Sidebar({ currentPage, onNavigate, status }: SidebarProps) {
-  const statusLabel = status?.state === "match_in_progress"
+export function Sidebar({ currentPage, onNavigate, status, recordingStatus }: SidebarProps) {
+  const gsiStatusLabel = status?.state === "match_in_progress"
     ? "Match in progress"
     : status?.state === "connected" ? "CS2 connected"
       : status?.state === "error" ? "Listener error" : "Waiting for game";
@@ -24,7 +28,7 @@ export function Sidebar({ currentPage, onNavigate, status }: SidebarProps) {
     <aside className="sidebar">
       <div className="brand-row">
         <BrandMark />
-        <span>OpenClip</span>
+        <img className="brand-banner" src={banner} alt="OpenClip" />
       </div>
 
       <nav className="primary-nav" aria-label="Primary navigation">
@@ -52,10 +56,12 @@ export function Sidebar({ currentPage, onNavigate, status }: SidebarProps) {
       </button>
 
       <div className="recording-card">
-        <div className="game-avatar">CS2</div>
+        <img className="game-avatar" src={cs2Artwork} alt="" />
         <div>
           <strong>Counter-Strike 2</strong>
-          <span className={`connection-${status?.state ?? "waiting_for_game"}`}><i /> {statusLabel}</span>
+          <span className={`connection-${recordingStatus?.state ?? status?.state ?? "waiting_for_game"}`}>
+            <i /> {recordingStatus?.message ?? gsiStatusLabel}
+          </span>
         </div>
       </div>
     </aside>

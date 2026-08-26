@@ -21,6 +21,38 @@ export interface Cs2SetupStatus {
   message: string;
 }
 
+export interface RecordingStatus {
+  state: "idle" | "waiting_for_game" | "initializing" | "recording" | "saving_replay" | "error";
+  game: "counter_strike2" | null;
+  message: string | null;
+  encoder: string | null;
+  captureWidth: number | null;
+  captureHeight: number | null;
+  captureFps: number | null;
+  bufferedSeconds: number;
+}
+
+export interface RecordingSettings {
+  quality: "performance" | "high" | "ultra";
+  resolution: "game_resolution" | "p1080" | "p1440";
+  framesPerSecond: number;
+  replayBufferSeconds: number;
+  preRollSeconds: number;
+  postRollSeconds: number;
+  captureKills: boolean;
+  captureHeadshots: boolean;
+  captureMultiKills: boolean;
+  captureGameAudio: boolean;
+  captureMicrophone: boolean;
+  microphoneDeviceId: string | null;
+  storagePath: string;
+}
+
+export interface AudioDevice {
+  id: string;
+  name: string;
+}
+
 export interface MatchRepository {
   list(): Promise<MatchRecord[]>;
   get(id: string): Promise<MatchRecord | null>;
@@ -85,6 +117,54 @@ export async function getCs2Status(): Promise<Cs2Status> {
     };
   }
   return invoke<Cs2Status>("get_cs2_status");
+}
+
+export async function getRecordingStatus(): Promise<RecordingStatus> {
+  if (!isTauri()) {
+    return {
+      state: "waiting_for_game",
+      game: "counter_strike2",
+      message: "Browser preview · capture runs in the desktop app",
+      encoder: null,
+      captureWidth: null,
+      captureHeight: null,
+      captureFps: null,
+      bufferedSeconds: 0,
+    };
+  }
+  return invoke<RecordingStatus>("get_recording_status");
+}
+
+export async function saveReplay(): Promise<void> {
+  await invoke("save_replay");
+}
+
+const browserSettings: RecordingSettings = {
+  quality: "high",
+  resolution: "game_resolution",
+  framesPerSecond: 60,
+  replayBufferSeconds: 45,
+  preRollSeconds: 10,
+  postRollSeconds: 5,
+  captureKills: true,
+  captureHeadshots: true,
+  captureMultiKills: true,
+  captureGameAudio: true,
+  captureMicrophone: false,
+  microphoneDeviceId: null,
+  storagePath: "OpenClip/Clips",
+};
+
+export async function getSettings(): Promise<RecordingSettings> {
+  return isTauri() ? invoke<RecordingSettings>("get_settings") : browserSettings;
+}
+
+export async function updateSettings(settings: RecordingSettings): Promise<void> {
+  if (isTauri()) await invoke("update_settings", { settings });
+}
+
+export async function getMicrophoneDevices(): Promise<AudioDevice[]> {
+  return isTauri() ? invoke<AudioDevice[]>("get_microphone_devices") : [];
 }
 
 export async function getCs2SetupStatus(): Promise<Cs2SetupStatus> {
