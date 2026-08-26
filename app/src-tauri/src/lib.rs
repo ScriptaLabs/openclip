@@ -1,6 +1,9 @@
 // Tauri command extraction requires owned `State` wrappers and deserialized command arguments.
 #![allow(clippy::needless_pass_by_value)]
 
+mod automatic;
+
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use openclip_capture::{AudioDevice, RecorderService, list_microphone_devices};
@@ -16,6 +19,9 @@ use openclip_storage::SqliteRepository;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_opener::OpenerExt;
+
+use automatic::{AutomaticMomentResult, AutomaticMomentService};
 
 type SharedService = Arc<GsiService<SqliteRepository>>;
 
@@ -23,6 +29,7 @@ struct AppState {
     repository: Arc<Mutex<SqliteRepository>>,
     gsi: SharedService,
     recorder: RecorderService,
+    automatic: AutomaticMomentService,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,8 +167,185 @@ fn update_settings(settings: Settings, state: State<'_, AppState>) -> Result<(),
         .map_err(|_| "database lock was poisoned".to_owned())?
         .save_settings(&settings)
         .map_err(|error| error.to_string())?;
-    state.recorder.update_settings(settings);
+    state.recorder.update_settings(settings.clone());
+    state.automatic.update_settings(settings);
     Ok(())
+}
+
+#[tauri::command]
+fn set_storage_path(path: PathBuf, state: State<'_, AppState>) -> Result<Settings, String> {
+    let path = validate_storage_directory(&path)?;
+    let mut repository = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?;
+    let mut settings = repository
+        .load_settings()
+        .map_err(|error| error.to_string())?;
+    settings.storage_path = path;
+    repository
+        .save_settings(&settings)
+        .map_err(|error| error.to_string())?;
+    drop(repository);
+    state.recorder.update_settings(settings.clone());
+    state.automatic.update_settings(settings.clone());
+    Ok(settings)
+}
+
+#[tauri::command]
+fn open_moment_clip(
+    match_id: MatchId,
+    moment_id: openclip_core::MomentId,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let game_match = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .get_match(match_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "match was not found".to_owned())?;
+    let path = game_match
+        .moments
+        .iter()
+        .find(|moment| moment.id == moment_id)
+        .and_then(|moment| moment.clip_path.as_ref())
+        .ok_or_else(|| "this moment has no captured video".to_owned())?;
+    if !path.is_file() {
+        return Err("the captured video file is no longer available".to_owned());
+    }
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn export_interesting_moments(
+    match_id: MatchId,
+    destination: PathBuf,
+    state: State<'_, AppState>,
+) -> Result<Vec<PathBuf>, String> {
+    let destination = validate_storage_directory(&destination)?;
+    let game_match = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .get_match(match_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "match was not found".to_owned())?;
+    let mut exported = Vec::new();
+    for moment in game_match.moments.iter().filter(|moment| {
+        moment.clip_path.is_some() && (moment.importance >= 10.0 || moment.is_favorite)
+    }) {
+        let source = moment
+            .clip_path
+            .as_ref()
+            .expect("filtered captured moments");
+        if !source.is_file() {
+            tracing::warn!(path = %source.display(), moment_id = %moment.id, "export source is missing");
+            continue;
+        }
+        let round = moment
+            .round_id
+            .and_then(|id| game_match.rounds.iter().find(|round| round.id == id))
+            .map_or(0, |round| round.number);
+        let map = sanitize_filename_component(
+            game_match
+                .map
+                .as_deref()
+                .unwrap_or("Unknown")
+                .trim_start_matches("de_"),
+        );
+        let classification = format!("{:?}", moment.classification);
+        let occurred_at = moment
+            .events
+            .first()
+            .map_or(game_match.started_at, |event| event.occurred_at);
+        let base = format!(
+            "{}_R{round:02}_{}_{}",
+            title_case(&map),
+            split_classification(&classification),
+            occurred_at.format("%Y-%m-%d_%H%M%S")
+        );
+        let target = available_export_path(&destination, &base, "mp4");
+        std::fs::copy(source, &target).map_err(|error| error.to_string())?;
+        exported.push(target);
+    }
+    Ok(exported)
+}
+
+fn validate_storage_directory(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err("choose a storage folder".to_owned());
+    }
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("could not create {}: {error}", path.display()))?;
+    if !path.is_dir() {
+        return Err(format!("{} is not a folder", path.display()));
+    }
+    let probe = path.join(format!(".openclip-write-test-{}", uuid::Uuid::new_v4()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|error| format!("OpenClip cannot write to {}: {error}", path.display()))?;
+    std::fs::remove_file(&probe)
+        .map_err(|error| format!("could not finish validating {}: {error}", path.display()))?;
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .map_err(|error| format!("could not resolve {}: {error}", path.display()))
+    }
+}
+
+fn sanitize_filename_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ if character.is_control() => '_',
+            _ => character,
+        })
+        .collect::<String>();
+    sanitized.trim().trim_matches('.').to_owned()
+}
+
+fn title_case(value: &str) -> String {
+    let mut characters = value.chars();
+    characters.next().map_or_else(
+        || "Unknown".to_owned(),
+        |first| first.to_uppercase().collect::<String>() + characters.as_str(),
+    )
+}
+
+fn split_classification(value: &str) -> String {
+    value
+        .chars()
+        .enumerate()
+        .fold(String::new(), |mut output, (index, character)| {
+            if index > 0 && character.is_uppercase() {
+                output.push('-');
+            }
+            output.push(character);
+            output
+        })
+}
+
+fn available_export_path(directory: &Path, base: &str, extension: &str) -> PathBuf {
+    let initial = directory.join(format!("{base}.{extension}"));
+    if !initial.exists() {
+        return initial;
+    }
+    for suffix in 2_u32.. {
+        let candidate = directory.join(format!("{base} ({suffix}).{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("the finite filesystem cannot contain every numeric suffix")
 }
 
 fn emit_game_updates(app: &tauri::AppHandle, update: &GameStateUpdate) {
@@ -194,6 +378,83 @@ fn emit_game_updates(app: &tauri::AppHandle, update: &GameStateUpdate) {
     }
 }
 
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+    let repository = Arc::new(Mutex::new(
+        SqliteRepository::open(data_dir.join("openclip.db"))
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    ));
+    let settings = repository
+        .lock()
+        .map_err(|_| std::io::Error::other("database lock was poisoned"))?
+        .load_settings()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let recorder = RecorderService::new(&data_dir, settings.clone())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let app_handle = app.handle().clone();
+    let notification_app = app.handle().clone();
+    let notify = Arc::new(move |result: AutomaticMomentResult| {
+        if let Err(error) = notification_app.emit("automatic_moment_finalized", result) {
+            tracing::warn!(%error, "could not emit automatic moment result");
+        }
+    });
+    let automatic =
+        AutomaticMomentService::start(repository.clone(), recorder.clone(), settings, notify)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let automatic_observer = automatic.clone();
+    let observer = Arc::new(move |update: &GameStateUpdate| {
+        emit_game_updates(&app_handle, update);
+        automatic_observer.observe(update);
+    });
+    let gsi = Arc::new(GsiService::with_observer(repository.clone(), observer));
+    app.manage(AppState {
+        repository,
+        gsi: gsi.clone(),
+        recorder: recorder.clone(),
+        automatic,
+    });
+
+    app.handle().plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_shortcuts(["F8"])?
+            .with_handler(|app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                let app = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let state = app.state::<AppState>();
+                    match save_and_persist_replay(&state) {
+                        Ok(clip) => {
+                            tracing::info!(path = %clip.path.display(), "F8 replay save completed");
+                            if let Err(error) = app.emit("replay_saved", clip) {
+                                tracing::warn!(%error, "could not emit replay saved event");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "F8 replay save was not available");
+                        }
+                    }
+                });
+            })
+            .build(),
+    )?;
+    recorder
+        .start()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+    let handler: Arc<dyn openclip_cs2::GsiPayloadHandler> = gsi.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = serve(GsiEndpoint::default(), handler).await {
+            tracing::error!(%error, "CS2 GSI listener stopped");
+            gsi.set_listener_error(error.to_string());
+        }
+    });
+    tracing::info!(path = %data_dir.display(), "OpenClip metadata store ready");
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -204,70 +465,9 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
-        .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            let repository = Arc::new(Mutex::new(
-                SqliteRepository::open(data_dir.join("openclip.db"))
-                    .map_err(|error| std::io::Error::other(error.to_string()))?,
-            ));
-            let app_handle = app.handle().clone();
-            let observer = Arc::new(move |update: &GameStateUpdate| {
-                emit_game_updates(&app_handle, update);
-            });
-            let gsi = Arc::new(GsiService::with_observer(repository.clone(), observer));
-            let recorder = RecorderService::new(
-                &data_dir,
-                repository
-                    .lock()
-                    .map_err(|_| std::io::Error::other("database lock was poisoned"))?
-                    .load_settings()
-                    .map_err(|error| std::io::Error::other(error.to_string()))?,
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            app.manage(AppState {
-                repository,
-                gsi: gsi.clone(),
-                recorder: recorder.clone(),
-            });
-
-            app.handle().plugin(
-                tauri_plugin_global_shortcut::Builder::new()
-                    .with_shortcuts(["F8"])?
-                    .with_handler(|app, _shortcut, event| {
-                        if event.state != ShortcutState::Pressed {
-                            return;
-                        }
-                        let app = app.clone();
-                        tauri::async_runtime::spawn_blocking(move || {
-                            let state = app.state::<AppState>();
-                            match save_and_persist_replay(&state) {
-                                Ok(clip) => {
-                                    tracing::info!(path = %clip.path.display(), "F8 replay save completed");
-                                    if let Err(error) = app.emit("replay_saved", clip) {
-                                        tracing::warn!(%error, "could not emit replay saved event");
-                                    }
-                                }
-                                Err(error) => tracing::warn!(%error, "F8 replay save was not available"),
-                            }
-                        });
-                    })
-                    .build(),
-            )?;
-            recorder
-                .start()
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-
-            let handler: Arc<dyn openclip_cs2::GsiPayloadHandler> = gsi.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = serve(GsiEndpoint::default(), handler).await {
-                    tracing::error!(%error, "CS2 GSI listener stopped");
-                    gsi.set_listener_error(error.to_string());
-                }
-            });
-            tracing::info!(path = %data_dir.display(), "OpenClip metadata store ready");
-            Ok(())
-        })
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
             get_recording_status,
             save_replay,
@@ -280,10 +480,51 @@ pub fn run() {
             get_game,
             get_game_moments,
             get_settings,
-            update_settings
+            update_settings,
+            set_storage_path,
+            open_moment_clip,
+            export_interesting_moments
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
             eprintln!("failed to run OpenClip: {error}");
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_names_are_windows_safe() {
+        assert_eq!(
+            sanitize_filename_component("de:mirage/one?"),
+            "de_mirage_one_"
+        );
+        assert_eq!(split_classification("TripleKill"), "Triple-Kill");
+    }
+
+    #[test]
+    fn duplicate_exports_receive_deterministic_suffixes() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        std::fs::write(directory.path().join("Mirage_R07_Triple-Kill.mp4"), b"one").unwrap();
+        std::fs::write(
+            directory.path().join("Mirage_R07_Triple-Kill (2).mp4"),
+            b"two",
+        )
+        .unwrap();
+        assert_eq!(
+            available_export_path(directory.path(), "Mirage_R07_Triple-Kill", "mp4"),
+            directory.path().join("Mirage_R07_Triple-Kill (3).mp4")
+        );
+    }
+
+    #[test]
+    fn storage_validation_creates_and_probes_directory() {
+        let parent = tempfile::tempdir().expect("temp directory");
+        let requested = parent.path().join("clips");
+        let validated = validate_storage_directory(&requested).expect("writable path");
+        assert!(validated.is_dir());
+        assert!(validated.read_dir().unwrap().next().is_none());
+    }
 }

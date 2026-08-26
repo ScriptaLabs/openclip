@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CAPTURED_CLIPS_MIGRATION: &str = include_str!("../migrations/0002_captured_clips.sql");
+const CLIP_ORIGINS_MIGRATION: &str = include_str!("../migrations/0003_clip_origins.sql");
 
 pub struct SqliteRepository {
     connection: Connection,
@@ -46,7 +47,9 @@ impl SqliteRepository {
 
     fn migrate(&self) -> openclip_core::Result<()> {
         self.connection
-            .execute_batch(&format!("{INITIAL_MIGRATION}\n{CAPTURED_CLIPS_MIGRATION}"))
+            .execute_batch(&format!(
+                "{INITIAL_MIGRATION}\n{CAPTURED_CLIPS_MIGRATION}\n{CLIP_ORIGINS_MIGRATION}"
+            ))
             .map_err(storage_error)
     }
 
@@ -121,8 +124,12 @@ impl SqliteRepository {
             .connection
             .prepare(
                 "SELECT m.id, m.round_id, m.start_offset_ms, m.end_offset_ms,
-                        m.classification, m.importance, m.is_favorite, c.path
-                 FROM moments m LEFT JOIN clips c ON c.moment_id = m.id
+                        m.classification, m.importance, m.is_favorite,
+                        COALESCE(c.path, legacy.path), c.id
+                 FROM moments m
+                 LEFT JOIN clip_origins origin ON origin.moment_id = m.id
+                 LEFT JOIN captured_clips c ON c.id = origin.clip_id
+                 LEFT JOIN clips legacy ON legacy.moment_id = m.id
                  WHERE m.match_id = ?1 ORDER BY m.start_offset_ms ASC",
             )
             .map_err(storage_error)?;
@@ -140,6 +147,8 @@ impl SqliteRepository {
                     importance: row.get(5)?,
                     is_favorite: row.get(6)?,
                     clip_path: row.get::<_, Option<String>>(7)?.map(Into::into),
+                    clip_id: parse_optional_uuid(row.get::<_, Option<String>>(8)?.as_deref())?
+                        .map(ClipId),
                 })
             })
             .map_err(storage_error)?;
@@ -225,87 +234,33 @@ impl MatchRepository for SqliteRepository {
     }
 
     fn save_moment(&mut self, moment: &Moment) -> openclip_core::Result<()> {
-        let start_offset_ms = to_sql_integer(moment.start_offset_ms)?;
-        let end_offset_ms = to_sql_integer(moment.end_offset_ms)?;
         let transaction = self.connection.transaction().map_err(storage_error)?;
-        transaction
-            .execute(
-                "INSERT INTO moments
-                 (id, match_id, round_id, start_offset_ms, end_offset_ms, classification,
-                  importance, is_favorite) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(id) DO UPDATE SET end_offset_ms = excluded.end_offset_ms,
-                   classification = excluded.classification, importance = excluded.importance,
-                   is_favorite = excluded.is_favorite",
-                params![
-                    moment.id.to_string(),
-                    moment.match_id.to_string(),
-                    moment.round_id.map(|id| id.to_string()),
-                    start_offset_ms,
-                    end_offset_ms,
-                    json_enum(moment.classification)?,
-                    moment.importance,
-                    moment.is_favorite,
-                ],
-            )
-            .map_err(storage_error)?;
-        transaction
-            .execute(
-                "DELETE FROM moment_events WHERE moment_id = ?1",
-                [moment.id.to_string()],
-            )
-            .map_err(storage_error)?;
-        for event in &moment.events {
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO moment_events (moment_id, event_id) VALUES (?1, ?2)",
-                    params![moment.id.to_string(), event.id.to_string()],
-                )
-                .map_err(storage_error)?;
-        }
-        if let Some(path) = &moment.clip_path {
-            transaction
-                .execute(
-                    "INSERT INTO clips (moment_id, path) VALUES (?1, ?2)
-                     ON CONFLICT(moment_id) DO UPDATE SET path = excluded.path",
-                    params![moment.id.to_string(), path.to_string_lossy()],
-                )
-                .map_err(storage_error)?;
-        }
+        write_moment(&transaction, moment)?;
+        transaction.commit().map_err(storage_error)
+    }
+
+    fn save_moment_with_clip(&mut self, moment: &Moment, clip: &Clip) -> openclip_core::Result<()> {
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        write_moment(&transaction, moment)?;
+        write_captured_clip(&transaction, clip)?;
         transaction.commit().map_err(storage_error)
     }
 
     fn save_clip(&mut self, clip: &Clip) -> openclip_core::Result<()> {
-        self.connection
-            .execute(
-                "INSERT INTO captured_clips
-             (id, match_id, created_at, path, duration_ms, width, height, frames_per_second,
-              codec, encoder, has_game_audio)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    clip.id.to_string(),
-                    clip.match_id.map(|id| id.to_string()),
-                    clip.created_at.to_rfc3339(),
-                    clip.path.to_string_lossy(),
-                    to_sql_integer(clip.duration_ms)?,
-                    i64::from(clip.width),
-                    i64::from(clip.height),
-                    i64::from(clip.frames_per_second),
-                    clip.codec,
-                    clip.encoder,
-                    clip.has_game_audio,
-                ],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        write_captured_clip(&transaction, clip)?;
+        transaction.commit().map_err(storage_error)
     }
 
     fn list_clips(&self) -> openclip_core::Result<Vec<Clip>> {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, match_id, created_at, path, duration_ms, width, height,
-                    frames_per_second, codec, encoder, has_game_audio
-             FROM captured_clips ORDER BY created_at DESC",
+                "SELECT c.id, c.match_id, c.created_at, c.path, c.duration_ms, c.width, c.height,
+                    c.frames_per_second, c.codec, c.encoder, c.has_game_audio,
+                    COALESCE(o.source, 'manual'), o.moment_id
+             FROM captured_clips c LEFT JOIN clip_origins o ON o.clip_id = c.id
+             ORDER BY c.created_at DESC",
             )
             .map_err(storage_error)?;
         statement
@@ -324,6 +279,9 @@ impl MatchRepository for SqliteRepository {
                     codec: row.get(8)?,
                     encoder: row.get(9)?,
                     has_game_audio: row.get(10)?,
+                    source: parse_json_enum(row.get::<_, String>(11)?)?,
+                    moment_id: parse_optional_uuid(row.get::<_, Option<String>>(12)?.as_deref())?
+                        .map(MomentId),
                 })
             })
             .map_err(storage_error)?
@@ -376,6 +334,88 @@ impl MatchRepository for SqliteRepository {
         }
         transaction.commit().map_err(storage_error)
     }
+}
+
+fn write_moment(connection: &Connection, moment: &Moment) -> openclip_core::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO moments
+             (id, match_id, round_id, start_offset_ms, end_offset_ms, classification,
+              importance, is_favorite) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET end_offset_ms = excluded.end_offset_ms,
+               classification = excluded.classification, importance = excluded.importance,
+               is_favorite = excluded.is_favorite",
+            params![
+                moment.id.to_string(),
+                moment.match_id.to_string(),
+                moment.round_id.map(|id| id.to_string()),
+                to_sql_integer(moment.start_offset_ms)?,
+                to_sql_integer(moment.end_offset_ms)?,
+                json_enum(moment.classification)?,
+                moment.importance,
+                moment.is_favorite,
+            ],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM moment_events WHERE moment_id = ?1",
+            [moment.id.to_string()],
+        )
+        .map_err(storage_error)?;
+    for event in &moment.events {
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO moment_events (moment_id, event_id) VALUES (?1, ?2)",
+                params![moment.id.to_string(), event.id.to_string()],
+            )
+            .map_err(storage_error)?;
+    }
+    if let Some(path) = &moment.clip_path {
+        connection
+            .execute(
+                "INSERT INTO clips (moment_id, path) VALUES (?1, ?2)
+                 ON CONFLICT(moment_id) DO UPDATE SET path = excluded.path",
+                params![moment.id.to_string(), path.to_string_lossy()],
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn write_captured_clip(connection: &Connection, clip: &Clip) -> openclip_core::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO captured_clips
+             (id, match_id, created_at, path, duration_ms, width, height, frames_per_second,
+              codec, encoder, has_game_audio)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                clip.id.to_string(),
+                clip.match_id.map(|id| id.to_string()),
+                clip.created_at.to_rfc3339(),
+                clip.path.to_string_lossy(),
+                to_sql_integer(clip.duration_ms)?,
+                i64::from(clip.width),
+                i64::from(clip.height),
+                i64::from(clip.frames_per_second),
+                clip.codec,
+                clip.encoder,
+                clip.has_game_audio,
+            ],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO clip_origins (clip_id, source, moment_id) VALUES (?1, ?2, ?3)",
+            params![
+                clip.id.to_string(),
+                json_enum(clip.source)?,
+                clip.moment_id.map(|id| id.to_string()),
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 fn write_session(connection: &Connection, session: &GameSession) -> openclip_core::Result<()> {
@@ -592,6 +632,7 @@ mod tests {
             events: vec![event.clone()],
             classification: MomentClassification::Kill,
             importance: 10.0,
+            clip_id: None,
             clip_path: Some("clips/mirage-kill.mkv".into()),
             is_favorite: true,
         };
@@ -624,6 +665,31 @@ mod tests {
         assert_eq!(loaded.moments[0].clip_path, moment.clip_path);
         assert!(loaded.moments[0].is_favorite);
 
+        let automatic_clip = Clip {
+            id: ClipId::new(),
+            match_id: Some(match_id),
+            moment_id: Some(moment.id),
+            source: openclip_core::ClipSource::AutomaticMoment,
+            created_at: timestamp(1_200),
+            path: "clips/mirage-auto.mp4".into(),
+            duration_ms: 15_000,
+            width: 1_920,
+            height: 1_080,
+            frames_per_second: 60,
+            codec: "h264".to_owned(),
+            encoder: "nvenc".to_owned(),
+            has_game_audio: true,
+        };
+        let mut captured_moment = moment.clone();
+        captured_moment.clip_id = Some(automatic_clip.id);
+        captured_moment.clip_path = Some(automatic_clip.path.clone());
+        repository
+            .save_moment_with_clip(&captured_moment, &automatic_clip)
+            .expect("moment and clip save atomically");
+        let loaded = repository.get_match(match_id).unwrap().unwrap();
+        assert_eq!(loaded.moments[0].clip_id, Some(automatic_clip.id));
+        assert_eq!(repository.list_clips().unwrap()[0], automatic_clip);
+
         let settings = Settings {
             quality: RecordingQuality::Ultra,
             ..Settings::default()
@@ -644,6 +710,8 @@ mod tests {
         let clip = Clip {
             id: ClipId::new(),
             match_id: None,
+            moment_id: None,
+            source: openclip_core::ClipSource::Manual,
             created_at: timestamp(1_500),
             path: "clips/manual.mp4".into(),
             duration_ms: 15_800,

@@ -65,6 +65,7 @@ pub trait MatchRepository: Send {
     fn save_round(&mut self, round: &Round) -> Result<()>;
     fn save_event(&mut self, event: &GameEvent) -> Result<()>;
     fn save_moment(&mut self, moment: &Moment) -> Result<()>;
+    fn save_moment_with_clip(&mut self, moment: &Moment, clip: &Clip) -> Result<()>;
     fn save_clip(&mut self, clip: &Clip) -> Result<()>;
     fn list_clips(&self) -> Result<Vec<Clip>>;
     fn load_settings(&self) -> Result<Settings>;

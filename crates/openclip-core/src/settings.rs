@@ -18,6 +18,16 @@ pub enum RecordingResolution {
     P1440,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentPreference {
+    #[default]
+    Mint,
+    Blue,
+    Purple,
+    Neutral,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 // Independent capture choices are intentionally represented as toggles in settings and in the UI.
@@ -37,6 +47,10 @@ pub struct Settings {
     #[serde(default)]
     pub microphone_device_id: Option<String>,
     pub storage_path: PathBuf,
+    #[serde(default)]
+    pub accent: AccentPreference,
+    #[serde(default = "default_true")]
+    pub show_clip_notifications: bool,
 }
 
 impl Default for Settings {
@@ -55,8 +69,14 @@ impl Default for Settings {
             capture_microphone: false,
             microphone_device_id: None,
             storage_path: PathBuf::from("OpenClip/Clips"),
+            accent: AccentPreference::Mint,
+            show_clip_notifications: true,
         }
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

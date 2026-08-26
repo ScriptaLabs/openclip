@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use mp4io::Mp4;
@@ -23,17 +24,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut count = 0_u64;
         let mut duration = 0_u64;
         let mut sync = 0_u64;
+        let mut durations = BTreeMap::<u32, u64>::new();
         for sample in track.samples() {
             let sample = sample?;
             count = count.saturating_add(1);
             duration = duration.saturating_add(u64::from(sample.duration));
             sync = sync.saturating_add(u64::from(sample.is_sync));
+            *durations.entry(sample.duration).or_default() += 1;
         }
         println!(
             "track={index} codec={:?} timescale={} samples={count} duration_ticks={duration} sync_samples={sync}",
             track.sample_entry().map(mp4io::SampleEntry::codec),
             track.timescale(),
         );
+        println!("  sample_duration_histogram={durations:?}");
     }
     Ok(())
 }

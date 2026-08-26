@@ -4,10 +4,11 @@
 //! detector lives here now because its timing contract determines what that buffer must retain.
 
 use std::collections::VecDeque;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use openclip_core::{
-    GameEvent, GameEventType, Moment, MomentClassification, MomentDetector, MomentId,
+    GameEvent, GameEventType, Moment, MomentClassification, MomentDetector, MomentId, Settings,
 };
 
 /// One independently playable encoded media segment. Segment creation restarts the encoder,
@@ -97,6 +98,41 @@ impl SegmentReplayBuffer {
         })
     }
 
+    /// Selects finalized segments intersecting a logical capture range. The selection may begin
+    /// before the requested start so decoding begins at a safe random-access boundary.
+    #[must_use]
+    pub fn select_range(&self, requested: RangeInclusive<u64>) -> Option<ReplaySelection> {
+        let requested_start = *requested.start();
+        let requested_end = *requested.end();
+        if requested_start > requested_end {
+            return None;
+        }
+        let start = self.segments.iter().position(|segment| {
+            segment.begins_with_keyframe && segment.ended_at_ms > requested_start
+        })?;
+        let segments = self
+            .segments
+            .iter()
+            .skip(start)
+            .take_while(|segment| segment.started_at_ms <= requested_end)
+            .cloned()
+            .collect::<Vec<_>>();
+        let first = segments.first()?;
+        let last = segments.last()?;
+        if last.ended_at_ms < requested_end {
+            return None;
+        }
+        Some(ReplaySelection {
+            duration_ms: last.ended_at_ms.saturating_sub(first.started_at_ms),
+            segments,
+        })
+    }
+
+    #[must_use]
+    pub fn latest_end_ms(&self) -> Option<u64> {
+        self.segments.back().map(|segment| segment.ended_at_ms)
+    }
+
     #[must_use]
     pub fn duration_ms(&self) -> u64 {
         self.segments
@@ -128,6 +164,9 @@ pub struct WindowedMomentDetector {
     pre_roll_ms: u64,
     post_roll_ms: u64,
     active: Option<Moment>,
+    capture_kills: bool,
+    capture_headshots: bool,
+    merge_multi_kills: bool,
 }
 
 impl WindowedMomentDetector {
@@ -137,14 +176,54 @@ impl WindowedMomentDetector {
             pre_roll_ms,
             post_roll_ms,
             active: None,
+            capture_kills: true,
+            capture_headshots: true,
+            merge_multi_kills: true,
         }
     }
 
-    fn is_qualifying(event: &GameEvent) -> bool {
-        matches!(
-            event.event_type,
-            GameEventType::Kill | GameEventType::Headshot
-        )
+    #[must_use]
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            pre_roll_ms: u64::from(settings.pre_roll_seconds) * 1_000,
+            post_roll_ms: u64::from(settings.post_roll_seconds) * 1_000,
+            active: None,
+            capture_kills: settings.capture_kills,
+            capture_headshots: settings.capture_headshots,
+            merge_multi_kills: settings.capture_multi_kills,
+        }
+    }
+
+    pub fn update_settings(&mut self, settings: &Settings) {
+        self.pre_roll_ms = u64::from(settings.pre_roll_seconds) * 1_000;
+        self.post_roll_ms = u64::from(settings.post_roll_seconds) * 1_000;
+        self.capture_kills = settings.capture_kills;
+        self.capture_headshots = settings.capture_headshots;
+        self.merge_multi_kills = settings.capture_multi_kills;
+    }
+
+    #[must_use]
+    pub const fn active(&self) -> Option<&Moment> {
+        self.active.as_ref()
+    }
+
+    pub fn finalize_expired(&mut self, now_offset_ms: u64) -> Option<Moment> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|moment| now_offset_ms >= moment.end_offset_ms)
+        {
+            return self.active.take();
+        }
+        None
+    }
+
+    fn is_qualifying(&self, event: &GameEvent) -> bool {
+        match event.event_type {
+            GameEventType::Kill => self.capture_kills,
+            GameEventType::Headshot => self.capture_headshots,
+            _ => false,
+        }
     }
 
     fn create_moment(&self, event: GameEvent, offset: u64) -> Moment {
@@ -161,6 +240,7 @@ impl WindowedMomentDetector {
             events: vec![event],
             classification: MomentClassification::Other,
             importance: 0.0,
+            clip_id: None,
             clip_path: None,
             is_favorite: false,
         };
@@ -176,20 +256,21 @@ impl WindowedMomentDetector {
             count.saturating_add(u8::from(event.event_type == GameEventType::Headshot))
         });
 
-        moment.classification = if kills >= 2 {
-            MomentClassification::MultiKill
-        } else if headshots > 0 {
-            MomentClassification::Headshot
-        } else {
-            MomentClassification::Kill
+        moment.classification = match kills {
+            0 | 1 if headshots > 0 => MomentClassification::Headshot,
+            0 | 1 => MomentClassification::Kill,
+            2 => MomentClassification::DoubleKill,
+            3 => MomentClassification::TripleKill,
+            4 => MomentClassification::QuadKill,
+            _ => MomentClassification::FiveKill,
         };
 
         let multi_kill_bonus = match kills {
             0 | 1 => 0.0,
-            2 => 15.0,
-            3 => 30.0,
-            4 => 50.0,
-            _ => 100.0,
+            2 => 10.0,
+            3 => 25.0,
+            4 => 40.0,
+            _ => 60.0,
         };
         moment.importance =
             (f32::from(kills) * 10.0) + (f32::from(headshots) * 5.0) + multi_kill_bonus;
@@ -198,16 +279,45 @@ impl WindowedMomentDetector {
 
 impl MomentDetector for WindowedMomentDetector {
     fn ingest(&mut self, event: GameEvent) -> openclip_core::Result<Option<Moment>> {
-        if !Self::is_qualifying(&event) {
+        let offset = event.match_offset_ms;
+        let boundary = match event.event_type {
+            GameEventType::MatchEnd => self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.match_id == event.match_id),
+            GameEventType::RoundEnd => self.active.as_ref().is_some_and(|active| {
+                active.match_id == event.match_id && active.round_id == event.round_id
+            }),
+            GameEventType::MatchStart | GameEventType::RoundStart => {
+                self.active.as_ref().is_some_and(|active| {
+                    active.match_id != event.match_id || active.round_id != event.round_id
+                })
+            }
+            _ => false,
+        };
+        if boundary {
+            if let (Some(active), Some(boundary_offset)) = (self.active.as_mut(), offset) {
+                active.end_offset_ms = active
+                    .end_offset_ms
+                    .min(boundary_offset)
+                    .max(active.start_offset_ms);
+            }
+            return Ok(self.active.take());
+        }
+        if !self.is_qualifying(&event) {
             return Ok(None);
         }
-        let Some(offset) = event.match_offset_ms else {
+        let Some(offset) = offset else {
             return Ok(None);
         };
 
         if let Some(active) = self.active.as_mut()
             && active.match_id == event.match_id
+            && active.round_id == event.round_id
             && offset <= active.end_offset_ms
+            && (self.merge_multi_kills
+                || (event.event_type == GameEventType::Headshot
+                    && active.events.last().and_then(|item| item.match_offset_ms) == Some(offset)))
         {
             active.end_offset_ms = active
                 .end_offset_ms
@@ -268,6 +378,25 @@ mod tests {
     }
 
     #[test]
+    fn ranged_selection_includes_complete_intersecting_segments() {
+        let mut buffer = SegmentReplayBuffer::new(60_000, 10_000);
+        for index in 0..6 {
+            buffer.push(segment(index, true));
+        }
+        let selection = buffer.select_range(3_500..=8_200).expect("selection");
+        assert_eq!(selection.segments[0].started_at_ms, 2_000);
+        assert_eq!(selection.segments.last().unwrap().ended_at_ms, 10_000);
+        assert_eq!(selection.duration_ms, 8_000);
+    }
+
+    #[test]
+    fn ranged_selection_waits_when_requested_end_is_not_finalized() {
+        let mut buffer = SegmentReplayBuffer::new(60_000, 10_000);
+        buffer.push(segment(0, true));
+        assert!(buffer.select_range(0..=2_500).is_none());
+    }
+
+    #[test]
     fn empty_buffer_has_no_replay() {
         assert!(
             SegmentReplayBuffer::new(30_000, 1_000)
@@ -317,8 +446,37 @@ mod tests {
         assert_eq!(moment.start_offset_ms, 21_000);
         assert_eq!(moment.end_offset_ms, 42_000);
         assert_eq!(moment.events.len(), 3);
-        assert_eq!(moment.classification, MomentClassification::MultiKill);
-        assert!((moment.importance - 60.0).abs() < f32::EPSILON);
+        assert_eq!(moment.classification, MomentClassification::TripleKill);
+        assert!((moment.importance - 55.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn single_kill_expires_as_one_moment() {
+        let match_id = MatchId::new();
+        let mut detector = WindowedMomentDetector::new(10_000, 5_000);
+        detector
+            .ingest(event(match_id, 20_000, GameEventType::Kill))
+            .unwrap();
+        assert!(detector.finalize_expired(24_999).is_none());
+        let moment = detector.finalize_expired(25_000).expect("expired moment");
+        assert_eq!(moment.classification, MomentClassification::Kill);
+        assert_eq!(moment.events.len(), 1);
+    }
+
+    #[test]
+    fn two_nearby_kills_classify_as_double_kill() {
+        let match_id = MatchId::new();
+        let mut detector = WindowedMomentDetector::new(10_000, 5_000);
+        detector
+            .ingest(event(match_id, 20_000, GameEventType::Kill))
+            .unwrap();
+        detector
+            .ingest(event(match_id, 22_000, GameEventType::Kill))
+            .unwrap();
+        assert_eq!(
+            detector.flush().unwrap().classification,
+            MomentClassification::DoubleKill
+        );
     }
 
     #[test]
@@ -343,5 +501,49 @@ mod tests {
             .ingest(event(MatchId::new(), 1_000, GameEventType::RoundStart))
             .unwrap();
         assert!(detector.flush().is_none());
+    }
+
+    #[test]
+    fn round_boundary_closes_active_moment() {
+        let match_id = MatchId::new();
+        let round_id = openclip_core::RoundId::new();
+        let mut kill = event(match_id, 20_000, GameEventType::Kill);
+        kill.round_id = Some(round_id);
+        let mut boundary = event(match_id, 22_000, GameEventType::RoundEnd);
+        boundary.round_id = Some(round_id);
+        let mut detector = WindowedMomentDetector::new(10_000, 5_000);
+        detector.ingest(kill).unwrap();
+        let finalized = detector.ingest(boundary).unwrap().expect("finalized");
+        assert_eq!(finalized.end_offset_ms, 22_000);
+        assert!(detector.active().is_none());
+    }
+
+    #[test]
+    fn match_boundary_closes_active_moment() {
+        let match_id = MatchId::new();
+        let mut detector = WindowedMomentDetector::new(10_000, 5_000);
+        detector
+            .ingest(event(match_id, 20_000, GameEventType::Kill))
+            .unwrap();
+        let finalized = detector
+            .ingest(event(match_id, 22_000, GameEventType::MatchEnd))
+            .unwrap()
+            .expect("finalized");
+        assert_eq!(finalized.match_id, match_id);
+        assert!(detector.active().is_none());
+    }
+
+    #[test]
+    fn disabled_kills_do_not_open_a_moment() {
+        let settings = Settings {
+            capture_kills: false,
+            capture_headshots: false,
+            ..Settings::default()
+        };
+        let mut detector = WindowedMomentDetector::from_settings(&settings);
+        detector
+            .ingest(event(MatchId::new(), 1_000, GameEventType::Kill))
+            .unwrap();
+        assert!(detector.active().is_none());
     }
 }

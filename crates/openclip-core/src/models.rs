@@ -129,6 +129,11 @@ pub struct GameEvent {
 pub enum MomentClassification {
     Kill,
     Headshot,
+    DoubleKill,
+    TripleKill,
+    QuadKill,
+    FiveKill,
+    /// Retained for reading pre-Milestone-4 databases; new moments use exact-count labels.
     MultiKill,
     Clutch,
     Ace,
@@ -147,9 +152,18 @@ pub struct Moment {
     pub events: Vec<GameEvent>,
     pub classification: MomentClassification,
     pub importance: f32,
+    #[serde(default)]
+    pub clip_id: Option<ClipId>,
     pub clip_path: Option<PathBuf>,
     #[serde(default)]
     pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipSource {
+    Manual,
+    AutomaticMoment,
 }
 
 /// A saved media file. Manual replays intentionally do not masquerade as detected moments.
@@ -158,6 +172,8 @@ pub struct Moment {
 pub struct Clip {
     pub id: ClipId,
     pub match_id: Option<MatchId>,
+    pub moment_id: Option<MomentId>,
+    pub source: ClipSource,
     pub created_at: DateTime<Utc>,
     pub path: PathBuf,
     pub duration_ms: u64,

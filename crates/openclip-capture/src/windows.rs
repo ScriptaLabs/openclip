@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use windows_capture::settings::{
 use windows_capture::window::Window;
 
 use crate::AudioDevice;
-use crate::config::encoder_config;
+use crate::config::{EncoderConfig, encoder_config};
 use crate::recorder::{SharedRecorder, lock, read, set_status, waiting_status};
 use crate::validate_finalized_segment;
 
@@ -32,6 +32,12 @@ const AUDIO_CHANNEL_CAPACITY: usize = 128;
 const AUDIO_CHUNK_FRAMES: usize = 480;
 
 type HandlerError = Box<dyn std::error::Error + Send + Sync>;
+type PreparedResult = std::result::Result<PreparedSegment, String>;
+type EncoderFactory = (
+    SyncSender<(u32, u32)>,
+    Receiver<PreparedResult>,
+    thread::JoinHandle<()>,
+);
 
 pub(crate) struct CaptureLifecycle {
     running: Arc<AtomicBool>,
@@ -71,10 +77,29 @@ impl CaptureLifecycle {
 #[derive(Clone)]
 struct HandlerFlags {
     shared: Arc<SharedRecorder>,
-    epoch: Instant,
     sequence: Arc<AtomicU64>,
     audio_receiver: Arc<Mutex<Receiver<Vec<u8>>>>,
     audio_error: Arc<Mutex<Option<String>>>,
+    finalizer: Sender<FinalizationJob>,
+    generation: Arc<AtomicU64>,
+    encoder_request: SyncSender<(u32, u32)>,
+    prepared_encoder: Arc<Mutex<Receiver<PreparedResult>>>,
+}
+
+struct PreparedSegment {
+    encoder: VideoEncoder,
+    partial_path: PathBuf,
+    source_size: (u32, u32),
+    config: EncoderConfig,
+    init_ms: u128,
+}
+
+struct FinalizationJob {
+    encoder: VideoEncoder,
+    partial_path: PathBuf,
+    started_at_ms: u64,
+    generation: u64,
+    generation_clock: Arc<AtomicU64>,
 }
 
 struct Cs2CaptureHandler {
@@ -87,6 +112,7 @@ struct Cs2CaptureHandler {
     frames: u64,
     dropped_frames: u64,
     diagnostics_started: Instant,
+    generation: u64,
 }
 
 impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
@@ -94,6 +120,7 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
     type Error = HandlerError;
 
     fn new(ctx: Context<Self::Flags>) -> std::result::Result<Self, Self::Error> {
+        let generation = ctx.flags.generation.load(Ordering::Acquire);
         Ok(Self {
             flags: ctx.flags,
             encoder: None,
@@ -104,6 +131,7 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
             frames: 0,
             dropped_frames: 0,
             diagnostics_started: Instant::now(),
+            generation,
         })
     }
 
@@ -152,7 +180,7 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
     }
 
     fn on_closed(&mut self) -> std::result::Result<(), Self::Error> {
-        self.finalize_segment()?;
+        self.queue_segment_finalization()?;
         tracing::info!("CS2 capture item closed");
         Ok(())
     }
@@ -164,40 +192,42 @@ impl Cs2CaptureHandler {
         source_size: (u32, u32),
         source_changed: bool,
     ) -> std::result::Result<(), HandlerError> {
-        self.finalize_segment()?;
         if source_changed {
-            let removed = lock(&self.flags.shared.buffer).clear();
-            remove_segments(removed);
+            self.finalize_segment_now()?;
+        } else {
+            self.queue_segment_finalization()?;
+        }
+        if source_changed {
+            let mut buffer = lock(&self.flags.shared.buffer);
+            self.generation = self.flags.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            let removed = buffer.clear();
+            drop(buffer);
+            remove_segments(&self.flags.shared, removed);
             tracing::info!(
                 width = source_size.0,
                 height = source_size.1,
                 "capture resolution changed; replay window reset"
             );
         }
-        let settings = read(&self.flags.shared.settings).clone();
-        let config = encoder_config(&settings, source_size.0, source_size.1);
-        let sequence = self.flags.sequence.fetch_add(1, Ordering::Relaxed);
-        let partial_path = self.flags.shared.replay_root.join(format!(
-            "segment-{:012}-{sequence:06}.mp4.partial",
-            self.flags.epoch.elapsed().as_millis()
-        ));
-        let initialized = Instant::now();
-        let encoder = VideoEncoder::new(
-            VideoSettingsBuilder::new(config.width, config.height)
-                .sub_type(VideoSettingsSubType::H264)
-                .bitrate(config.bitrate)
-                .frame_rate(u32::from(config.frames_per_second)),
-            AudioSettingsBuilder::new().disabled(!config.capture_game_audio),
-            ContainerSettingsBuilder::new(),
-            &partial_path,
-        )?;
+        let prepared = if source_changed {
+            self.discard_prepared_encoder();
+            prepare_segment(&self.flags.shared, &self.flags.sequence, source_size)?
+        } else {
+            match self.take_prepared_encoder(source_size)? {
+                Some(prepared) => prepared,
+                None => prepare_segment(&self.flags.shared, &self.flags.sequence, source_size)?,
+            }
+        };
+        let config = prepared.config;
         self.source_size = Some(source_size);
         self.segment_started = Some(Instant::now());
         self.segment_started_at_ms = self.flags.shared.timeline_offset_ms.saturating_add(
-            u64::try_from(self.flags.epoch.elapsed().as_millis()).unwrap_or(u64::MAX),
+            u64::try_from(self.flags.shared.clock_started.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
         );
-        self.partial_path = Some(partial_path);
-        self.encoder = Some(encoder);
+        self.partial_path = Some(prepared.partial_path);
+        self.encoder = Some(prepared.encoder);
+        let _ = self.flags.encoder_request.try_send(source_size);
 
         let audio_error = lock(&self.flags.audio_error).clone();
         let mut status = lock(&self.flags.shared.status);
@@ -220,46 +250,193 @@ impl Cs2CaptureHandler {
             fps = config.frames_per_second,
             bitrate = config.bitrate,
             audio = config.capture_game_audio,
-            init_ms = initialized.elapsed().as_millis(),
+            init_ms = prepared.init_ms,
             backend = %status.encoder.as_deref().unwrap_or("unknown"),
             "H.264 hardware-accelerated segment encoder initialized"
         );
         Ok(())
     }
 
-    fn finalize_segment(&mut self) -> std::result::Result<(), HandlerError> {
-        let Some(encoder) = self.encoder.take() else {
-            return Ok(());
-        };
-        let partial = self.partial_path.take().expect("encoder path is paired");
-        encoder.finish()?;
-        let media = validate_finalized_segment(&partial)?;
-        let final_path = partial.with_extension("");
-        std::fs::rename(&partial, &final_path)?;
-        let size_bytes = std::fs::metadata(&final_path)?.len();
-        let segment = ReplaySegment {
-            path: final_path,
+    fn take_prepared_encoder(
+        &self,
+        source_size: (u32, u32),
+    ) -> std::result::Result<Option<PreparedSegment>, HandlerError> {
+        match lock(&self.flags.prepared_encoder).try_recv() {
+            Ok(prepared) => {
+                let prepared = prepared.map_err(capture_error)?;
+                if prepared.source_size == source_size {
+                    Ok(Some(prepared))
+                } else {
+                    discard_encoder_async(prepared);
+                    Ok(None)
+                }
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => Ok(None),
+        }
+    }
+
+    fn discard_prepared_encoder(&self) {
+        if let Ok(prepared) = lock(&self.flags.prepared_encoder).try_recv()
+            && let Ok(prepared) = prepared
+        {
+            discard_encoder_async(prepared);
+        }
+    }
+
+    fn take_finalization_job(&mut self) -> Option<FinalizationJob> {
+        let encoder = self.encoder.take()?;
+        Some(FinalizationJob {
+            encoder,
+            partial_path: self.partial_path.take().expect("encoder path is paired"),
             started_at_ms: self.segment_started_at_ms,
-            ended_at_ms: self.segment_started_at_ms.saturating_add(media.duration_ms),
-            size_bytes,
-            begins_with_keyframe: true,
-        };
-        let mut buffer = lock(&self.flags.shared.buffer);
-        remove_segments(buffer.push(segment));
-        let mut status = lock(&self.flags.shared.status);
-        status.buffered_seconds = u16::try_from(buffer.duration_ms() / 1_000).unwrap_or(u16::MAX);
-        tracing::debug!(
-            segments = buffer.len(),
-            buffer_bytes = buffer.total_bytes(),
-            buffered_seconds = status.buffered_seconds,
-            "finalized replay segment"
-        );
+            generation: self.generation,
+            generation_clock: self.flags.generation.clone(),
+        })
+    }
+
+    fn queue_segment_finalization(&mut self) -> std::result::Result<(), HandlerError> {
+        if let Some(job) = self.take_finalization_job() {
+            self.flags
+                .finalizer
+                .send(job)
+                .map_err(|_| "replay segment finalizer stopped")?;
+        }
+        Ok(())
+    }
+
+    fn finalize_segment_now(&mut self) -> std::result::Result<(), HandlerError> {
+        if let Some(job) = self.take_finalization_job() {
+            finalize_segment(&self.flags.shared, job)?;
+        }
         Ok(())
     }
 }
 
+fn finalize_segment(
+    shared: &SharedRecorder,
+    job: FinalizationJob,
+) -> std::result::Result<(), HandlerError> {
+    let started = Instant::now();
+    job.encoder.finish()?;
+    let media = validate_finalized_segment(&job.partial_path)?;
+    let final_path = job.partial_path.with_extension("");
+    std::fs::rename(&job.partial_path, &final_path)?;
+    let size_bytes = std::fs::metadata(&final_path)?.len();
+    let segment = ReplaySegment {
+        path: final_path,
+        started_at_ms: job.started_at_ms,
+        ended_at_ms: job.started_at_ms.saturating_add(media.duration_ms),
+        size_bytes,
+        begins_with_keyframe: true,
+    };
+    let mut buffer = lock(&shared.buffer);
+    if job.generation != job.generation_clock.load(Ordering::Acquire) {
+        drop(buffer);
+        std::fs::remove_file(&segment.path)?;
+        tracing::debug!("discarded a finalized segment from an obsolete capture resolution");
+        return Ok(());
+    }
+    let removed = buffer.push(segment);
+    let mut status = lock(&shared.status);
+    status.buffered_seconds = u16::try_from(buffer.duration_ms() / 1_000).unwrap_or(u16::MAX);
+    tracing::debug!(
+        segments = buffer.len(),
+        buffer_bytes = buffer.total_bytes(),
+        buffered_seconds = status.buffered_seconds,
+        finalize_ms = started.elapsed().as_millis(),
+        "finalized replay segment"
+    );
+    drop(status);
+    drop(buffer);
+    shared.buffer_finalized.notify_all();
+    remove_segments(shared, removed);
+    Ok(())
+}
+
+fn prepare_segment(
+    shared: &SharedRecorder,
+    sequence: &AtomicU64,
+    source_size: (u32, u32),
+) -> std::result::Result<PreparedSegment, HandlerError> {
+    let config = encoder_config(&read(&shared.settings), source_size.0, source_size.1);
+    let sequence = sequence.fetch_add(1, Ordering::Relaxed);
+    let partial_path = shared.replay_root.join(format!(
+        "segment-{:012}-{sequence:06}.mp4.partial",
+        shared.clock_started.elapsed().as_millis()
+    ));
+    let initialized = Instant::now();
+    let encoder = VideoEncoder::new(
+        VideoSettingsBuilder::new(config.width, config.height)
+            .sub_type(VideoSettingsSubType::H264)
+            .bitrate(config.bitrate)
+            .frame_rate(u32::from(config.frames_per_second)),
+        AudioSettingsBuilder::new().disabled(!config.capture_game_audio),
+        ContainerSettingsBuilder::new(),
+        &partial_path,
+    )?;
+    Ok(PreparedSegment {
+        encoder,
+        partial_path,
+        source_size,
+        config,
+        init_ms: initialized.elapsed().as_millis(),
+    })
+}
+
+fn spawn_encoder_factory(
+    shared: &Arc<SharedRecorder>,
+    sequence: &Arc<AtomicU64>,
+) -> std::io::Result<EncoderFactory> {
+    let (request_sender, requests) = sync_channel(1);
+    let (prepared_sender, prepared_receiver) = sync_channel(1);
+    let shared = shared.clone();
+    let sequence = sequence.clone();
+    let worker = thread::Builder::new()
+        .name("openclip-encoder-prewarmer".to_owned())
+        .spawn(move || {
+            let _ = initialize_mta();
+            while let Ok(source_size) = requests.recv() {
+                let prepared = prepare_segment(&shared, &sequence, source_size)
+                    .map_err(|error| error.to_string());
+                if prepared_sender.send(prepared).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok((request_sender, prepared_receiver, worker))
+}
+
+fn discard_encoder_async(prepared: PreparedSegment) {
+    let result = thread::Builder::new()
+        .name("openclip-unused-encoder-cleanup".to_owned())
+        .spawn(move || {
+            let path = prepared.partial_path.clone();
+            drop(prepared);
+            let _ = std::fs::remove_file(path);
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "could not start unused encoder cleanup");
+    }
+}
+
+fn spawn_segment_finalizer(
+    shared: &Arc<SharedRecorder>,
+) -> std::io::Result<(Sender<FinalizationJob>, thread::JoinHandle<()>)> {
+    let (sender, receiver) = channel();
+    let shared = shared.clone();
+    let worker = thread::Builder::new()
+        .name("openclip-segment-finalizer".to_owned())
+        .spawn(move || {
+            while let Ok(job) = receiver.recv() {
+                if let Err(error) = finalize_segment(&shared, job) {
+                    tracing::error!(%error, "could not finalize replay segment");
+                }
+            }
+        })?;
+    Ok((sender, worker))
+}
+
 fn supervise(shared: &Arc<SharedRecorder>, stop: &Arc<AtomicBool>) {
-    let epoch = Instant::now();
     let sequence = Arc::new(AtomicU64::new(0));
     while !stop.load(Ordering::Acquire) {
         if !hardware_ready(shared) {
@@ -288,73 +465,82 @@ fn supervise(shared: &Arc<SharedRecorder>, stop: &Arc<AtomicBool>) {
             RecordingState::Initializing,
             "Initializing CS2 capture…",
         );
-        let process_id = match target.process_id() {
-            Ok(id) => id,
-            Err(error) => {
-                set_status(
-                    shared,
-                    RecordingState::Error,
-                    format!("Could not inspect CS2: {error}"),
-                );
-                continue;
-            }
-        };
-        let audio_stop = Arc::new(AtomicBool::new(false));
-        let (audio_sender, audio_receiver) = sync_channel(AUDIO_CHANNEL_CAPACITY);
-        let audio_error = Arc::new(Mutex::new(None));
-        if read(&shared.settings).capture_game_audio {
-            spawn_audio_capture(
-                process_id,
-                audio_sender,
-                audio_stop.clone(),
-                audio_error.clone(),
+        if let Err(error) = run_capture_session(shared, stop, &sequence, target) {
+            set_status(
+                shared,
+                RecordingState::Error,
+                format!("Capture session failed: {error}"),
             );
-        }
-        let fps = read(&shared.settings).frames_per_second.clamp(1, 60);
-        let flags = HandlerFlags {
-            shared: shared.clone(),
-            epoch,
-            sequence: sequence.clone(),
-            audio_receiver: Arc::new(Mutex::new(audio_receiver)),
-            audio_error,
-        };
-        let settings = CaptureSettings::new(
-            target,
-            CursorCaptureSettings::WithoutCursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Exclude,
-            MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / f64::from(fps))),
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            flags,
-        );
-        match Cs2CaptureHandler::start_free_threaded(settings) {
-            Ok(control) => {
-                tracing::info!(process_id, "CS2 capture target detected");
-                while !stop.load(Ordering::Acquire) && !control.is_finished() && cs2_window_exists()
-                {
-                    thread::sleep(Duration::from_millis(500));
-                }
-                audio_stop.store(true, Ordering::Release);
-                if let Err(error) = control.stop() {
-                    tracing::warn!(%error, "capture session ended with an error");
-                }
-            }
-            Err(error) => {
-                audio_stop.store(true, Ordering::Release);
-                set_status(
-                    shared,
-                    RecordingState::Error,
-                    format!("Capture initialization failed: {error}"),
-                );
-                tracing::error!(%error, "could not initialize Windows Graphics Capture");
-            }
+            tracing::error!(%error, "capture session failed");
         }
         if !stop.load(Ordering::Acquire) {
             *lock(&shared.status) = waiting_status();
             thread::sleep(Duration::from_millis(750));
         }
     }
+}
+
+fn run_capture_session(
+    shared: &Arc<SharedRecorder>,
+    stop: &AtomicBool,
+    sequence: &Arc<AtomicU64>,
+    target: Window,
+) -> std::result::Result<(), HandlerError> {
+    let process_id = target.process_id()?;
+    let audio_stop = Arc::new(AtomicBool::new(false));
+    let (audio_sender, audio_receiver) = sync_channel(AUDIO_CHANNEL_CAPACITY);
+    let audio_error = Arc::new(Mutex::new(None));
+    if read(&shared.settings).capture_game_audio {
+        spawn_audio_capture(
+            process_id,
+            audio_sender,
+            audio_stop.clone(),
+            audio_error.clone(),
+        );
+    }
+    let fps = read(&shared.settings).frames_per_second.clamp(1, 60);
+    let (finalizer, finalizer_thread) = spawn_segment_finalizer(shared)?;
+    let (encoder_request, prepared_encoder, encoder_factory) =
+        spawn_encoder_factory(shared, sequence)?;
+    let flags = HandlerFlags {
+        shared: shared.clone(),
+        sequence: sequence.clone(),
+        audio_receiver: Arc::new(Mutex::new(audio_receiver)),
+        audio_error,
+        finalizer: finalizer.clone(),
+        generation: Arc::new(AtomicU64::new(0)),
+        encoder_request,
+        prepared_encoder: Arc::new(Mutex::new(prepared_encoder)),
+    };
+    let settings = CaptureSettings::new(
+        target,
+        CursorCaptureSettings::WithoutCursor,
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Exclude,
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / f64::from(fps))),
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        flags,
+    );
+    let capture_result = match Cs2CaptureHandler::start_free_threaded(settings) {
+        Ok(control) => {
+            tracing::info!(process_id, "CS2 capture target detected");
+            while !stop.load(Ordering::Acquire) && !control.is_finished() && cs2_window_exists() {
+                thread::sleep(Duration::from_millis(500));
+            }
+            control.stop().map_err(HandlerError::from)
+        }
+        Err(error) => Err(HandlerError::from(error)),
+    };
+    audio_stop.store(true, Ordering::Release);
+    drop(finalizer);
+    if finalizer_thread.join().is_err() {
+        return Err("replay segment finalizer panicked".into());
+    }
+    if encoder_factory.join().is_err() {
+        return Err("encoder prewarmer panicked".into());
+    }
+    capture_result
 }
 
 fn hardware_ready(shared: &SharedRecorder) -> bool {
@@ -458,8 +644,12 @@ fn nvidia_driver_available() -> bool {
     })
 }
 
-fn remove_segments(segments: Vec<ReplaySegment>) {
+fn remove_segments(shared: &SharedRecorder, segments: Vec<ReplaySegment>) {
     for segment in segments {
+        if lock(&shared.pinned_segments).contains(&segment.path) {
+            lock(&shared.deferred_deletes).push(segment.path);
+            continue;
+        }
         if let Err(error) = std::fs::remove_file(&segment.path) {
             tracing::warn!(%error, path = %segment.path.display(), "could not prune replay segment");
         }

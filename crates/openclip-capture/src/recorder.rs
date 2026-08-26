@@ -1,10 +1,14 @@
+use std::collections::HashSet;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use openclip_buffer::SegmentReplayBuffer;
 use openclip_core::{
-    Clip, ClipId, Game, MatchId, OpenClipError, RecordingState, RecordingStatus, Result, Settings,
+    Clip, ClipId, ClipSource, Game, MatchId, MomentId, OpenClipError, RecordingState,
+    RecordingStatus, Result, Settings,
 };
 
 use crate::remux_segments;
@@ -13,12 +17,16 @@ const MANUAL_REPLAY_MS: u64 = 15_000;
 
 pub(crate) struct SharedRecorder {
     pub buffer: Mutex<SegmentReplayBuffer>,
+    pub buffer_finalized: Condvar,
     pub status: Mutex<RecordingStatus>,
     pub settings: RwLock<Settings>,
     pub data_root: PathBuf,
     pub replay_root: PathBuf,
     pub timeline_offset_ms: u64,
+    pub clock_started: Instant,
     pub save_lock: Mutex<()>,
+    pub pinned_segments: Mutex<HashSet<PathBuf>>,
+    pub deferred_deletes: Mutex<Vec<PathBuf>>,
 }
 
 #[derive(Clone)]
@@ -40,12 +48,16 @@ impl RecorderService {
         let timeline_offset_ms = recover_replay_directory(&replay_root, &mut buffer)?;
         let shared = Arc::new(SharedRecorder {
             buffer: Mutex::new(buffer),
+            buffer_finalized: Condvar::new(),
             status: Mutex::new(waiting_status()),
             settings: RwLock::new(settings),
             data_root,
             replay_root,
             timeline_offset_ms,
+            clock_started: Instant::now(),
             save_lock: Mutex::new(()),
+            pinned_segments: Mutex::new(HashSet::new()),
+            deferred_deletes: Mutex::new(Vec::new()),
         });
         Ok(Self {
             shared,
@@ -79,6 +91,13 @@ impl RecorderService {
         *write(&self.shared.settings) = settings;
     }
 
+    #[must_use]
+    pub fn timeline_now_ms(&self) -> u64 {
+        self.shared.timeline_offset_ms.saturating_add(
+            u64::try_from(self.shared.clock_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        )
+    }
+
     /// Saves encoded buffer samples by remuxing only. The caller persists the returned metadata.
     pub fn save_replay(&self, match_id: Option<MatchId>) -> Result<Clip> {
         let _save = lock(&self.shared.save_lock);
@@ -98,11 +117,104 @@ impl RecorderService {
     }
 
     fn save_replay_inner(&self, match_id: Option<MatchId>) -> Result<Clip> {
-        // Holding the buffer lock pins selected segment files against pruning during remux.
-        let buffer = lock(&self.shared.buffer);
-        let selection = buffer.select_recent(MANUAL_REPLAY_MS).ok_or_else(|| {
-            OpenClipError::Unavailable("the replay buffer has no finalized segments".to_owned())
+        let selection = {
+            let buffer = lock(&self.shared.buffer);
+            let selection = buffer.select_recent(MANUAL_REPLAY_MS).ok_or_else(|| {
+                OpenClipError::Unavailable("the replay buffer has no finalized segments".to_owned())
+            })?;
+            self.pin_segments(
+                &selection
+                    .segments
+                    .iter()
+                    .map(|segment| segment.path.clone())
+                    .collect::<Vec<_>>(),
+            );
+            selection
+        };
+        self.save_selection(&selection, match_id, None, ClipSource::Manual, "manual")
+    }
+
+    /// Saves a specific capture-timeline range after its newest segment has finalized.
+    pub fn save_range(
+        &self,
+        requested: RangeInclusive<u64>,
+        match_id: MatchId,
+        moment_id: MomentId,
+    ) -> Result<Clip> {
+        let _save = lock(&self.shared.save_lock);
+        let previous = self.status();
+        if !matches!(
+            previous.state,
+            RecordingState::Recording | RecordingState::SavingReplay
+        ) {
+            return Err(OpenClipError::Unavailable(
+                "capture was unavailable when the moment completed".to_owned(),
+            ));
+        }
+        set_status(
+            &self.shared,
+            RecordingState::SavingReplay,
+            "Saving highlight…",
+        );
+        let result = self.save_range_inner(requested, match_id, moment_id);
+        *lock(&self.shared.status) = previous;
+        result
+    }
+
+    fn save_range_inner(
+        &self,
+        requested: RangeInclusive<u64>,
+        match_id: MatchId,
+        moment_id: MomentId,
+    ) -> Result<Clip> {
+        let requested_end = *requested.end();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buffer = lock(&self.shared.buffer);
+        while buffer.latest_end_ms().is_none_or(|end| end < requested_end) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(OpenClipError::Unavailable(
+                    "the newest replay segment did not finalize before the highlight timeout"
+                        .to_owned(),
+                ));
+            }
+            let waited = self
+                .shared
+                .buffer_finalized
+                .wait_timeout(buffer, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            buffer = waited.0;
+        }
+        let selection = buffer.select_range(requested).ok_or_else(|| {
+            OpenClipError::Unavailable(
+                "the requested replay range is no longer retained".to_owned(),
+            )
         })?;
+        self.pin_segments(
+            &selection
+                .segments
+                .iter()
+                .map(|segment| segment.path.clone())
+                .collect::<Vec<_>>(),
+        );
+        drop(buffer);
+        self.save_selection(
+            &selection,
+            Some(match_id),
+            Some(moment_id),
+            ClipSource::AutomaticMoment,
+            "highlight",
+        )
+    }
+
+    fn save_selection(
+        &self,
+        selection: &openclip_buffer::ReplaySelection,
+        match_id: Option<MatchId>,
+        moment_id: Option<MomentId>,
+        source: ClipSource,
+        suffix: &str,
+    ) -> Result<Clip> {
         let settings = read(&self.shared.settings).clone();
         let clip_root = if settings.storage_path.is_absolute() {
             settings.storage_path.clone()
@@ -113,17 +225,21 @@ impl RecorderService {
         std::fs::create_dir_all(&date_root).map_err(capture_error)?;
         let id = ClipId::new();
         let path = date_root.join(format!(
-            "{}_{}_manual.mp4",
+            "{}_{}_{}.mp4",
             Utc::now().format("%H-%M-%S"),
-            &id.to_string()[..8]
+            &id.to_string()[..8],
+            suffix,
         ));
         let paths = selection
             .segments
             .iter()
             .map(|segment| segment.path.clone())
             .collect::<Vec<_>>();
+        self.pin_segments(&paths);
         let started = std::time::Instant::now();
-        let media = remux_segments(&paths, &path)?;
+        let media = remux_segments(&paths, &path);
+        self.unpin_segments(&paths);
+        let media = media?;
         tracing::info!(
             path = %path.display(),
             duration_ms = media.duration_ms,
@@ -134,6 +250,8 @@ impl RecorderService {
         Ok(Clip {
             id,
             match_id,
+            moment_id,
+            source,
             created_at: Utc::now(),
             path,
             duration_ms: media.duration_ms,
@@ -144,6 +262,32 @@ impl RecorderService {
             encoder: "windows_media_foundation_hardware".to_owned(),
             has_game_audio: media.has_audio,
         })
+    }
+
+    fn pin_segments(&self, paths: &[PathBuf]) {
+        let mut pinned = lock(&self.shared.pinned_segments);
+        pinned.extend(paths.iter().cloned());
+    }
+
+    fn unpin_segments(&self, paths: &[PathBuf]) {
+        {
+            let mut pinned = lock(&self.shared.pinned_segments);
+            for path in paths {
+                pinned.remove(path);
+            }
+        }
+        let mut deferred = lock(&self.shared.deferred_deletes);
+        let mut index = 0;
+        while index < deferred.len() {
+            if paths.contains(&deferred[index]) {
+                let path = deferred.swap_remove(index);
+                if let Err(error) = std::fs::remove_file(&path) {
+                    tracing::warn!(%error, path = %path.display(), "could not delete released replay segment");
+                }
+            } else {
+                index += 1;
+            }
+        }
     }
 }
 
@@ -267,6 +411,10 @@ mod tests {
     use mp4io::{Codec, InputSample, TrackParams, Writer, WriterConfig};
 
     fn write_finalized_segment(path: &Path) {
+        write_finalized_segment_with_duration(path, 1_000);
+    }
+
+    fn write_finalized_segment_with_duration(path: &Path, duration: u32) {
         let mut writer = Writer::new(WriterConfig::default());
         let video = writer.add_track(TrackParams::video(Codec::H264, 1_280, 720).timescale(1_000));
         writer
@@ -274,7 +422,7 @@ mod tests {
                 video,
                 InputSample {
                     data: &[0, 0, 0, 1, 0x65],
-                    duration: 1_000,
+                    duration,
                     composition_offset: 0,
                     is_sync: true,
                 },
@@ -317,5 +465,54 @@ mod tests {
         let directory = tempfile::tempdir().expect("temp directory");
         let recorder = RecorderService::new(directory.path(), Settings::default()).unwrap();
         assert!(recorder.save_replay(None).is_err());
+    }
+
+    #[test]
+    fn ranged_save_waits_for_pending_segment_finalization() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let recorder = RecorderService::new(directory.path(), Settings::default()).unwrap();
+        set_status(&recorder.shared, RecordingState::Recording, "testing");
+        let saving = recorder.clone();
+        let match_id = MatchId::new();
+        let moment_id = MomentId::new();
+        let handle = std::thread::spawn(move || saving.save_range(0..=2_500, match_id, moment_id));
+
+        std::thread::sleep(Duration::from_millis(50));
+        let segment_path = recorder.shared.replay_root.join("pending.mp4");
+        write_finalized_segment_with_duration(&segment_path, 3_000);
+        let size_bytes = std::fs::metadata(&segment_path).unwrap().len();
+        lock(&recorder.shared.buffer).push(openclip_buffer::ReplaySegment {
+            path: segment_path,
+            started_at_ms: 0,
+            ended_at_ms: 3_000,
+            size_bytes,
+            begins_with_keyframe: true,
+        });
+        recorder.shared.buffer_finalized.notify_all();
+
+        let clip = handle.join().unwrap().expect("ranged clip saves");
+        assert_eq!(clip.source, ClipSource::AutomaticMoment);
+        assert_eq!(clip.moment_id, Some(moment_id));
+    }
+
+    #[test]
+    fn manual_replay_remains_a_distinct_clip_source() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let recorder = RecorderService::new(directory.path(), Settings::default()).unwrap();
+        set_status(&recorder.shared, RecordingState::Recording, "testing");
+        let segment_path = recorder.shared.replay_root.join("manual-source.mp4");
+        write_finalized_segment(&segment_path);
+        let size_bytes = std::fs::metadata(&segment_path).unwrap().len();
+        lock(&recorder.shared.buffer).push(openclip_buffer::ReplaySegment {
+            path: segment_path,
+            started_at_ms: 0,
+            ended_at_ms: 1_000,
+            size_bytes,
+            begins_with_keyframe: true,
+        });
+
+        let clip = recorder.save_replay(None).expect("manual clip saves");
+        assert_eq!(clip.source, ClipSource::Manual);
+        assert_eq!(clip.moment_id, None);
     }
 }
