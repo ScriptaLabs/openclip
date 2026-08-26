@@ -6,16 +6,26 @@ import { MatchArtwork } from "../components/MatchArtwork";
 interface GamesPageProps {
   matches: MatchRecord[];
   onOpenMatch: (id: string) => void;
+  error: string | null;
 }
 
 function relativeLabel(startedAt: string): string {
   const date = new Date(startedAt);
-  return date.getUTCDate() === 26 ? (date.getUTCHours() >= 18 ? "42 minutes ago" : "Earlier today") : "Yesterday";
+  const elapsed = Math.max(0, Date.now() - date.getTime());
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) {
+    const value = Math.max(1, minutes);
+    return `${value} ${value === 1 ? "minute" : "minutes"} ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hours ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function GamesPage({ matches, onOpenMatch }: GamesPageProps) {
-  const today = matches.filter((match) => new Date(match.startedAt).getUTCDate() === 26);
-  const earlier = matches.filter((match) => new Date(match.startedAt).getUTCDate() !== 26);
+export function GamesPage({ matches, onOpenMatch, error }: GamesPageProps) {
+  const todayKey = new Date().toDateString();
+  const today = matches.filter((match) => new Date(match.startedAt).toDateString() === todayKey);
+  const earlier = matches.filter((match) => new Date(match.startedAt).toDateString() !== todayKey);
 
   const renderCard = (match: MatchRecord) => {
     const stats = getMatchStats(match);
@@ -45,7 +55,6 @@ export function GamesPage({ matches, onOpenMatch }: GamesPageProps) {
     <div className="page games-page">
       <header className="page-header">
         <div>
-          <span className="eyebrow">Match library</span>
           <h1>Games</h1>
           <p>Your recent Counter-Strike matches, organized around the moments that mattered.</p>
         </div>
@@ -54,6 +63,11 @@ export function GamesPage({ matches, onOpenMatch }: GamesPageProps) {
           <span>matches captured</span>
         </div>
       </header>
+
+      {error && <div className="state-card error-state"><strong>Couldn’t load matches</strong><span>{error}</span></div>}
+      {!error && matches.length === 0 && (
+        <div className="state-card"><strong>No matches yet</strong><span>Start CS2 with GSI configured. OpenClip will add live matches here.</span></div>
+      )}
 
       {today.length > 0 && (
         <section className="match-group">
@@ -70,4 +84,3 @@ export function GamesPage({ matches, onOpenMatch }: GamesPageProps) {
     </div>
   );
 }
-

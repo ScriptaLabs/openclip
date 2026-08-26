@@ -1,15 +1,43 @@
+import { useEffect, useState } from "react";
 import { ChevronDown, FolderOpen } from "lucide-react";
+import { getCs2SetupStatus, installCs2GsiConfig, type Cs2SetupStatus } from "../data/matchRepository";
 
 export function SettingsPage() {
+  const [setup, setSetup] = useState<Cs2SetupStatus | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [installing, setInstalling] = useState(false);
+
+  const refreshSetup = () => getCs2SetupStatus().then(setSetup).catch((error) => setSetupError(String(error)));
+  useEffect(() => { void refreshSetup(); }, []);
+
+  const install = async () => {
+    setInstalling(true);
+    setSetupError(null);
+    try {
+      await installCs2GsiConfig();
+      await refreshSetup();
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
   return (
     <div className="page settings-page">
       <header className="page-header">
         <div>
-          <span className="eyebrow">Keep it simple</span>
           <h1>Settings</h1>
           <p>Recording defaults designed for high-quality local clips.</p>
         </div>
       </header>
+
+      <section className="settings-panel integration-panel">
+        <div className="settings-heading"><h2>Counter-Strike 2 integration</h2><p>{setupError ?? setup?.message ?? "Checking CS2 installation…"}</p></div>
+        <button className="secondary-button" disabled={!setup?.found || setup.configured || installing} onClick={() => void install()} type="button">
+          {setup?.configured ? "Configuration installed" : installing ? "Installing…" : "Install GSI configuration"}
+        </button>
+      </section>
 
       <section className="settings-panel">
         <div className="settings-heading"><h2>Recording</h2><p>Applied the next time capture starts.</p></div>
@@ -43,4 +71,3 @@ export function SettingsPage() {
     </div>
   );
 }
-

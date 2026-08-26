@@ -31,7 +31,6 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
 
       <header className="detail-hero">
         <div>
-          <span className="eyebrow">Completed match</span>
           <h1>{mapName}</h1>
           <div className="match-result-line">
             <span>{formatMode(match.mode)}</span>
@@ -47,7 +46,6 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
       <section className="timeline-panel">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">Match overview</span>
             <h2>Timeline</h2>
           </div>
           <div className="timeline-legend"><i /> Captured moment</div>
@@ -69,7 +67,6 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
       <section className="detail-section">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">Worth another look</span>
             <h2>Highlights</h2>
           </div>
           <span className="section-count">{match.moments.length} moments</span>
@@ -99,12 +96,12 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
             );
           })}
         </div>
+        {match.moments.length === 0 && <div className="inline-empty">No highlight windows have been created for this match.</div>}
       </section>
 
       <section className="detail-section rounds-section">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">Full match</span>
             <h2>All rounds</h2>
           </div>
         </div>
@@ -127,7 +124,7 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
       </section>
 
       <footer className="capture-note">
-        <Headphones size={15} /> Development fixture • Video capture begins in Milestone 4
+        <Headphones size={15} /> Game events are local metadata. Video capture is not active yet.
       </footer>
     </div>
   );

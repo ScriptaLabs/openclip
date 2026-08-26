@@ -1,11 +1,13 @@
 import { Clapperboard, Gamepad2, Settings } from "lucide-react";
 import { BrandMark } from "./BrandMark";
+import type { Cs2Status } from "../data/matchRepository";
 
 export type Page = "games" | "montages" | "settings";
 
 interface SidebarProps {
   currentPage: Page;
   onNavigate: (page: Page) => void;
+  status: Cs2Status | null;
 }
 
 const navigation = [
@@ -13,7 +15,11 @@ const navigation = [
   { id: "montages" as const, label: "Montages", icon: Clapperboard },
 ];
 
-export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
+export function Sidebar({ currentPage, onNavigate, status }: SidebarProps) {
+  const statusLabel = status?.state === "match_in_progress"
+    ? "Match in progress"
+    : status?.state === "connected" ? "CS2 connected"
+      : status?.state === "error" ? "Listener error" : "Waiting for game";
   return (
     <aside className="sidebar">
       <div className="brand-row">
@@ -49,10 +55,9 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         <div className="game-avatar">CS2</div>
         <div>
           <strong>Counter-Strike 2</strong>
-          <span><i /> Waiting for game</span>
+          <span className={`connection-${status?.state ?? "waiting_for_game"}`}><i /> {statusLabel}</span>
         </div>
       </div>
     </aside>
   );
 }
-
