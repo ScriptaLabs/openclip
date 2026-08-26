@@ -27,6 +27,13 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.23.0", features = ["serde", "v4"] }
+mp4io = "0.1.2"
+
+[workspace.dependencies.windows-capture]
+version = "2.0.1"
+
+[workspace.dependencies.wasapi]
+version = "0.24.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

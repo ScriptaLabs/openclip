@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::{
-    GameEvent, GameSession, GameStateUpdate, Match, MatchId, Moment, RecordingStatus, Round,
+    Clip, GameEvent, GameSession, GameStateUpdate, Match, MatchId, Moment, RecordingStatus, Round,
     Settings,
 };
 
@@ -65,6 +65,8 @@ pub trait MatchRepository: Send {
     fn save_round(&mut self, round: &Round) -> Result<()>;
     fn save_event(&mut self, event: &GameEvent) -> Result<()>;
     fn save_moment(&mut self, moment: &Moment) -> Result<()>;
+    fn save_clip(&mut self, clip: &Clip) -> Result<()>;
+    fn list_clips(&self) -> Result<Vec<Clip>>;
     fn load_settings(&self) -> Result<Settings>;
     fn save_settings(&mut self, settings: &Settings) -> Result<()>;
     fn apply_game_update(&mut self, update: &GameStateUpdate) -> Result<()>;

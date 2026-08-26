@@ -37,6 +37,7 @@ id_type!(MatchId);
 id_type!(RoundId);
 id_type!(GameEventId);
 id_type!(MomentId);
+id_type!(ClipId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,12 +152,31 @@ pub struct Moment {
     pub is_favorite: bool,
 }
 
+/// A saved media file. Manual replays intentionally do not masquerade as detected moments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Clip {
+    pub id: ClipId,
+    pub match_id: Option<MatchId>,
+    pub created_at: DateTime<Utc>,
+    pub path: PathBuf,
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub frames_per_second: u16,
+    pub codec: String,
+    pub encoder: String,
+    pub has_game_audio: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingState {
     Idle,
     WaitingForGame,
+    Initializing,
     Recording,
+    SavingReplay,
     Error,
 }
 
@@ -166,6 +186,16 @@ pub struct RecordingStatus {
     pub state: RecordingState,
     pub game: Option<Game>,
     pub message: Option<String>,
+    #[serde(default)]
+    pub encoder: Option<String>,
+    #[serde(default)]
+    pub capture_width: Option<u32>,
+    #[serde(default)]
+    pub capture_height: Option<u32>,
+    #[serde(default)]
+    pub capture_fps: Option<u16>,
+    #[serde(default)]
+    pub buffered_seconds: u16,
 }
 
 /// One atomic set of domain changes produced from a game-state transition.
@@ -207,6 +237,11 @@ mod tests {
             state: RecordingState::WaitingForGame,
             game: Some(Game::CounterStrike2),
             message: None,
+            encoder: None,
+            capture_width: None,
+            capture_height: None,
+            capture_fps: None,
+            buffered_seconds: 0,
         };
         let json = serde_json::to_value(status).expect("status should serialize");
         assert_eq!(json["state"], "waiting_for_game");

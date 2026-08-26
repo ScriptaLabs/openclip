@@ -5,8 +5,20 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
+mp4io.workspace = true
+openclip-buffer = { path = "../openclip-buffer" }
 openclip-core = { path = "../openclip-core" }
+serde.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+wasapi.workspace = true
+windows-capture.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
-

@@ -5,14 +5,15 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use openclip_core::{
-    GameEvent, GameEventId, GameSession, GameSessionId, GameStateUpdate, Match, MatchId,
-    MatchRepository, Moment, MomentId, OpenClipError, Round, RoundId, Settings,
+    Clip, ClipId, GameEvent, GameEventId, GameSession, GameSessionId, GameStateUpdate, Match,
+    MatchId, MatchRepository, Moment, MomentId, OpenClipError, Round, RoundId, Settings,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
 use uuid::Uuid;
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
+const CAPTURED_CLIPS_MIGRATION: &str = include_str!("../migrations/0002_captured_clips.sql");
 
 pub struct SqliteRepository {
     connection: Connection,
@@ -45,7 +46,7 @@ impl SqliteRepository {
 
     fn migrate(&self) -> openclip_core::Result<()> {
         self.connection
-            .execute_batch(INITIAL_MIGRATION)
+            .execute_batch(&format!("{INITIAL_MIGRATION}\n{CAPTURED_CLIPS_MIGRATION}"))
             .map_err(storage_error)
     }
 
@@ -271,6 +272,63 @@ impl MatchRepository for SqliteRepository {
                 .map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)
+    }
+
+    fn save_clip(&mut self, clip: &Clip) -> openclip_core::Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO captured_clips
+             (id, match_id, created_at, path, duration_ms, width, height, frames_per_second,
+              codec, encoder, has_game_audio)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    clip.id.to_string(),
+                    clip.match_id.map(|id| id.to_string()),
+                    clip.created_at.to_rfc3339(),
+                    clip.path.to_string_lossy(),
+                    to_sql_integer(clip.duration_ms)?,
+                    i64::from(clip.width),
+                    i64::from(clip.height),
+                    i64::from(clip.frames_per_second),
+                    clip.codec,
+                    clip.encoder,
+                    clip.has_game_audio,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn list_clips(&self) -> openclip_core::Result<Vec<Clip>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, match_id, created_at, path, duration_ms, width, height,
+                    frames_per_second, codec, encoder, has_game_audio
+             FROM captured_clips ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(Clip {
+                    id: ClipId(parse_uuid(&row.get::<_, String>(0)?)?),
+                    match_id: parse_optional_uuid(row.get::<_, Option<String>>(1)?.as_deref())?
+                        .map(MatchId),
+                    created_at: parse_datetime(&row.get::<_, String>(2)?)?,
+                    path: row.get::<_, String>(3)?.into(),
+                    duration_ms: parse_nonnegative(row.get(4)?)?,
+                    width: u32::try_from(row.get::<_, i64>(5)?).map_err(sql_conversion)?,
+                    height: u32::try_from(row.get::<_, i64>(6)?).map_err(sql_conversion)?,
+                    frames_per_second: u16::try_from(row.get::<_, i64>(7)?)
+                        .map_err(sql_conversion)?,
+                    codec: row.get(8)?,
+                    encoder: row.get(9)?,
+                    has_game_audio: row.get(10)?,
+                })
+            })
+            .map_err(storage_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_error)
     }
 
     fn load_settings(&self) -> openclip_core::Result<Settings> {
@@ -578,5 +636,25 @@ mod tests {
     fn defaults_settings_when_no_row_exists() {
         let repository = SqliteRepository::in_memory().expect("database opens");
         assert_eq!(repository.load_settings().unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn manual_clip_round_trips_without_a_moment() {
+        let mut repository = SqliteRepository::in_memory().expect("database opens");
+        let clip = Clip {
+            id: ClipId::new(),
+            match_id: None,
+            created_at: timestamp(1_500),
+            path: "clips/manual.mp4".into(),
+            duration_ms: 15_800,
+            width: 1_920,
+            height: 1_080,
+            frames_per_second: 60,
+            codec: "h264".to_owned(),
+            encoder: "nvenc".to_owned(),
+            has_game_audio: true,
+        };
+        repository.save_clip(&clip).expect("clip saves");
+        assert_eq!(repository.list_clips().unwrap(), vec![clip]);
     }
 }

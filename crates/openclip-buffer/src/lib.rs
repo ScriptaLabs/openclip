@@ -3,9 +3,125 @@
 //! Encoded-segment storage and extraction arrive with the recording milestone. The moment
 //! detector lives here now because its timing contract determines what that buffer must retain.
 
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
 use openclip_core::{
     GameEvent, GameEventType, Moment, MomentClassification, MomentDetector, MomentId,
 };
+
+/// One independently playable encoded media segment. Segment creation restarts the encoder,
+/// which makes the first video sample a random-access point without retaining raw frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaySegment {
+    pub path: PathBuf,
+    pub started_at_ms: u64,
+    pub ended_at_ms: u64,
+    pub size_bytes: u64,
+    pub begins_with_keyframe: bool,
+}
+
+impl ReplaySegment {
+    #[must_use]
+    pub const fn duration_ms(&self) -> u64 {
+        self.ended_at_ms.saturating_sub(self.started_at_ms)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaySelection {
+    pub segments: Vec<ReplaySegment>,
+    pub duration_ms: u64,
+}
+
+/// Hard-bounded, encoded-only rolling replay window.
+#[derive(Debug)]
+pub struct SegmentReplayBuffer {
+    segments: VecDeque<ReplaySegment>,
+    max_duration_ms: u64,
+    max_bytes: u64,
+    total_bytes: u64,
+}
+
+impl SegmentReplayBuffer {
+    #[must_use]
+    pub const fn new(max_duration_ms: u64, max_bytes: u64) -> Self {
+        Self {
+            segments: VecDeque::new(),
+            max_duration_ms,
+            max_bytes,
+            total_bytes: 0,
+        }
+    }
+
+    pub fn push(&mut self, segment: ReplaySegment) -> Vec<ReplaySegment> {
+        self.total_bytes = self.total_bytes.saturating_add(segment.size_bytes);
+        self.segments.push_back(segment);
+        self.prune()
+    }
+
+    pub fn clear(&mut self) -> Vec<ReplaySegment> {
+        self.total_bytes = 0;
+        self.segments.drain(..).collect()
+    }
+
+    fn prune(&mut self) -> Vec<ReplaySegment> {
+        let mut removed = Vec::new();
+        while self.total_bytes > self.max_bytes || self.duration_ms() > self.max_duration_ms {
+            let Some(segment) = self.segments.pop_front() else {
+                break;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(segment.size_bytes);
+            removed.push(segment);
+        }
+        removed
+    }
+
+    #[must_use]
+    pub fn select_recent(&self, requested_ms: u64) -> Option<ReplaySelection> {
+        let latest_end = self.segments.back()?.ended_at_ms;
+        let requested_start = latest_end.saturating_sub(requested_ms);
+        let start = self.segments.iter().position(|segment| {
+            segment.begins_with_keyframe && segment.ended_at_ms > requested_start
+        })?;
+        let segments = self
+            .segments
+            .iter()
+            .skip(start)
+            .cloned()
+            .collect::<Vec<_>>();
+        let duration_ms = latest_end.saturating_sub(segments.first()?.started_at_ms);
+        Some(ReplaySelection {
+            segments,
+            duration_ms,
+        })
+    }
+
+    #[must_use]
+    pub fn duration_ms(&self) -> u64 {
+        self.segments
+            .front()
+            .zip(self.segments.back())
+            .map_or(0, |(first, last)| {
+                last.ended_at_ms.saturating_sub(first.started_at_ms)
+            })
+    }
+
+    #[must_use]
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.segments.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+}
 
 #[derive(Debug)]
 pub struct WindowedMomentDetector {
@@ -118,6 +234,47 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn segment(index: u64, keyframe: bool) -> ReplaySegment {
+        ReplaySegment {
+            path: format!("{index}.mp4").into(),
+            started_at_ms: index * 2_000,
+            ended_at_ms: (index + 1) * 2_000,
+            size_bytes: 100,
+            begins_with_keyframe: keyframe,
+        }
+    }
+
+    #[test]
+    fn replay_buffer_is_bounded_by_time_and_bytes() {
+        let mut buffer = SegmentReplayBuffer::new(6_000, 350);
+        for index in 0..5 {
+            buffer.push(segment(index, true));
+        }
+        assert_eq!(buffer.len(), 3);
+        assert_eq!(buffer.duration_ms(), 6_000);
+        assert_eq!(buffer.total_bytes(), 300);
+    }
+
+    #[test]
+    fn recent_selection_starts_only_at_a_keyframe() {
+        let mut buffer = SegmentReplayBuffer::new(60_000, 10_000);
+        for (index, keyframe) in [true, false, true, true, true].into_iter().enumerate() {
+            buffer.push(segment(index as u64, keyframe));
+        }
+        let selection = buffer.select_recent(7_000).expect("selection");
+        assert_eq!(selection.segments[0].path, PathBuf::from("2.mp4"));
+        assert_eq!(selection.duration_ms, 6_000);
+    }
+
+    #[test]
+    fn empty_buffer_has_no_replay() {
+        assert!(
+            SegmentReplayBuffer::new(30_000, 1_000)
+                .select_recent(15_000)
+                .is_none()
+        );
+    }
 
     fn event(match_id: MatchId, offset: u64, event_type: GameEventType) -> GameEvent {
         let _session_id = GameSessionId::new();
