@@ -89,12 +89,10 @@ impl MomentDetector for WindowedMomentDetector {
             return Ok(None);
         };
 
-        let can_extend = self.active.as_ref().is_some_and(|active| {
-            active.match_id == event.match_id && offset <= active.end_offset_ms
-        });
-
-        if can_extend {
-            let active = self.active.as_mut().expect("active moment was checked");
+        if let Some(active) = self.active.as_mut()
+            && active.match_id == event.match_id
+            && offset <= active.end_offset_ms
+        {
             active.end_offset_ms = active
                 .end_offset_ms
                 .max(offset.saturating_add(self.post_roll_ms));
