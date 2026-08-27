@@ -8,3 +8,6 @@
 .DS_Store
 Thumbs.db
 
+# Only ffmpeg.exe is shipped by OpenClip; the companion CLI/player are local tooling.
+/dependencies/ffmpeg/ffplay.exe
+/dependencies/ffmpeg/ffprobe.exe

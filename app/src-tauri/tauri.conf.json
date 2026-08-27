@@ -37,7 +37,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../assets/branding/watermark.mov": "assets/branding/watermark.mov"
+      "../assets/branding/watermark.mov": "assets/branding/watermark.mov",
+      "../../dependencies/ffmpeg/ffmpeg.exe": "bin/ffmpeg.exe"
     }
   }
 }

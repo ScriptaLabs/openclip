@@ -365,7 +365,7 @@ fn export_interesting_moments(
         );
         let target = available_export_path(&destination, &base, "mp4");
         if let Some(watermark) = &watermark {
-            render_watermarked_export(source, &target, watermark)?;
+            render_watermarked_export(&app, source, &target, watermark)?;
         } else {
             std::fs::copy(source, &target).map_err(|error| error.to_string())?;
         }
@@ -388,7 +388,12 @@ fn watermark_asset_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "the OpenClip watermark asset is missing".to_owned())
 }
 
-fn render_watermarked_export(source: &Path, target: &Path, watermark: &Path) -> Result<(), String> {
+fn render_watermarked_export(
+    app: &tauri::AppHandle,
+    source: &Path,
+    target: &Path,
+    watermark: &Path,
+) -> Result<(), String> {
     let media =
         openclip_capture::validate_finalized_segment(source).map_err(|error| error.to_string())?;
     // The final logo occupies only part of the transparent 400 px canvas, so a 25% canvas
@@ -398,8 +403,8 @@ fn render_watermarked_export(source: &Path, target: &Path, watermark: &Path) -> 
         "[1:v]format=rgba,scale={watermark_width}:-2,tpad=stop_mode=clone:stop_duration=86400[wm];[0:v][wm]overlay=W-w-W*0.025:H*0.025:shortest=1[v]"
     );
     let partial = target.with_extension("watermarked.mp4.partial");
-    let ffmpeg = std::env::var_os("OPENCLIP_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
-    let mut command = Command::new(ffmpeg);
+    let ffmpeg = bundled_ffmpeg_path(app);
+    let mut command = Command::new(&ffmpeg);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -433,7 +438,10 @@ fn render_watermarked_export(source: &Path, target: &Path, watermark: &Path) -> 
         .arg(&partial)
         .output()
         .map_err(|error| {
-            format!("watermark export requires FFmpeg (set OPENCLIP_FFMPEG): {error}")
+            format!(
+                "could not start bundled FFmpeg at {}: {error}",
+                ffmpeg.display()
+            )
         })?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&partial);
@@ -444,6 +452,24 @@ fn render_watermarked_export(source: &Path, target: &Path, watermark: &Path) -> 
     }
     std::fs::rename(&partial, target).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn bundled_ffmpeg_path(app: &tauri::AppHandle) -> PathBuf {
+    if let Some(override_path) = std::env::var_os("OPENCLIP_FFMPEG") {
+        return PathBuf::from(override_path);
+    }
+    let packaged = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|directory| directory.join("bin/ffmpeg.exe"));
+    let development =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dependencies/ffmpeg/ffmpeg.exe");
+    packaged
+        .into_iter()
+        .chain([development])
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
 }
 
 fn watermark_canvas_width(video_width: u32) -> u32 {
