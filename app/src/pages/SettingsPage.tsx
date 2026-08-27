@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { FolderOpen } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -24,11 +24,13 @@ export function SettingsPage() {
   const [installing, setInstalling] = useState(false);
   const [settings, setSettings] = useState<RecordingSettings | null>(null);
   const [microphones, setMicrophones] = useState<AudioDevice[]>([]);
+  const [shortcutDraft, setShortcutDraft] = useState("F8");
+  const [savingShortcut, setSavingShortcut] = useState(false);
 
   const refreshSetup = () => getCs2SetupStatus().then(setSetup).catch((error) => setSetupError(String(error)));
   useEffect(() => {
     void refreshSetup();
-    void getSettings().then(setSettings).catch((error) => setSetupError(String(error)));
+    void getSettings().then((loaded) => { setSettings(loaded); setShortcutDraft(loaded.manualReplayShortcut); }).catch((error) => setSetupError(String(error)));
     void getMicrophoneDevices().then(setMicrophones).catch((error) => setSetupError(String(error)));
   }, []);
 
@@ -61,6 +63,30 @@ export function SettingsPage() {
       if (selected) setSettings(await setStoragePath(selected));
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const captureShortcut = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+    event.preventDefault();
+    const modifiers = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Super"].filter(Boolean);
+    const key = event.key === " " ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+    setShortcutDraft([...modifiers, key].join("+"));
+  };
+
+  const applyShortcut = async () => {
+    if (!settings || shortcutDraft === settings.manualReplayShortcut) return;
+    setSavingShortcut(true);
+    setSetupError(null);
+    const next = { ...settings, manualReplayShortcut: shortcutDraft };
+    try {
+      await updateSettings(next);
+      setSettings(next);
+    } catch (error) {
+      setShortcutDraft(settings.manualReplayShortcut);
+      setSetupError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingShortcut(false);
     }
   };
 
@@ -118,12 +144,22 @@ export function SettingsPage() {
       </section>
 
       <section className="settings-panel">
+        <div className="settings-heading"><h2>Manual replay shortcut</h2><p>Works globally while OpenClip is running.</p></div>
+        <div className="shortcut-setting">
+          <label><span>Shortcut</span><input aria-label="Manual replay shortcut" disabled={!settings || savingShortcut} onKeyDown={captureShortcut} readOnly value={shortcutDraft} /></label>
+          <button className="secondary-button" disabled={!settings || savingShortcut || shortcutDraft === settings.manualReplayShortcut} onClick={() => void applyShortcut()} type="button">{savingShortcut ? "Applying…" : "Apply"}</button>
+        </div>
+        <small className="settings-help">Click the field, then press a key or combination such as F8 or Ctrl+Shift+S.</small>
+      </section>
+
+      <section className="settings-panel">
         <div className="settings-heading"><h2>Appearance and behavior</h2><p>Restrained preferences for capture feedback and intentional accents.</p></div>
         <div className="settings-grid compact-settings">
           <label><span>Accent</span><select disabled={!settings} value={settings?.accent ?? "mint"} onChange={(event) => settings && save({ ...settings, accent: event.target.value as RecordingSettings["accent"] })}><option value="mint">Mint</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="neutral">Neutral</option></select></label>
         </div>
         <div className="toggle-list recording-toggles">
           <label className="toggle-row"><span><strong>Clip captured notification</strong><small>Show a restrained in-app confirmation after automatic capture</small></span><input disabled={!settings} type="checkbox" checked={settings?.showClipNotifications ?? true} onChange={(event) => settings && save({ ...settings, showClipNotifications: event.target.checked })} /><i /></label>
+          <label className="toggle-row"><span><strong>Animated export watermark</strong><small>Optional OpenClip mark in the top-right of exported clips</small></span><input disabled={!settings} type="checkbox" checked={settings?.watermarkEnabled ?? false} onChange={(event) => settings && save({ ...settings, watermarkEnabled: event.target.checked })} /><i /></label>
         </div>
       </section>
     </div>

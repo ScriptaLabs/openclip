@@ -179,7 +179,10 @@ impl RecorderService {
         moment_id: MomentId,
     ) -> Result<Clip> {
         let requested_end = *requested.end();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let until_requested_end = requested_end.saturating_sub(self.timeline_now_ms());
+        let deadline = Instant::now()
+            + Duration::from_millis(until_requested_end.min(30_000))
+            + Duration::from_secs(5);
         let mut buffer = lock(&self.shared.buffer);
         while buffer.latest_end_ms().is_none_or(|end| end < requested_end) {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -251,6 +254,10 @@ impl RecorderService {
         let media = remux_segments(&paths, &path);
         self.unpin_segments(&paths);
         let media = media?;
+        #[cfg(windows)]
+        if let Err(error) = crate::generate_clip_thumbnail(&path) {
+            tracing::warn!(%error, path = %path.display(), "could not generate clip thumbnail");
+        }
         tracing::info!(
             path = %path.display(),
             duration_ms = media.duration_ms,

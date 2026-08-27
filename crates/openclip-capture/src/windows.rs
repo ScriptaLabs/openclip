@@ -245,6 +245,16 @@ impl Cs2CaptureHandler {
         source_size: (u32, u32),
         source_changed: bool,
     ) -> std::result::Result<(), HandlerError> {
+        // Audio capture is started before WGC so endpoint initialization cannot delay video.
+        // Discard those pre-video samples: feeding them to a zero-based AAC stream makes sound
+        // lead the first picture by the amount of time WGC/NVENC took to initialize.
+        let discarded_audio_chunks = drain_pending_audio(&self.flags.audio_receiver);
+        if discarded_audio_chunks > 0 {
+            tracing::debug!(
+                discarded_audio_ms = discarded_audio_chunks * 10,
+                "discarded audio captured before the first video frame"
+            );
+        }
         if source_changed
             && let Some(mut encoder) = self.encoder.take()
             && let Some(segment) = encoder.finish_segment()?
@@ -287,10 +297,13 @@ impl Cs2CaptureHandler {
         let _ = self.flags.audio_encoder_request.try_send(source_size);
 
         let audio_error = lock(&self.flags.audio_error).clone();
+        let manual_replay_shortcut = read(&self.flags.shared.settings)
+            .manual_replay_shortcut
+            .clone();
         let mut status = lock(&self.flags.shared.status);
         status.state = RecordingState::Recording;
         status.message = Some(audio_error.map_or_else(
-            || "Replay active · F8 saves the last 15 seconds".to_owned(),
+            || format!("Replay active · {manual_replay_shortcut} saves the last 15 seconds"),
             |error| format!("Replay active · audio unavailable: {error}"),
         ));
         status.encoder = Some("NVIDIA NVENC DirectX 11".to_owned());
@@ -390,6 +403,15 @@ impl Cs2CaptureHandler {
         let _ = self.flags.audio_encoder_request.try_send(source_size);
         Ok(())
     }
+}
+
+fn drain_pending_audio(receiver: &Mutex<Receiver<Vec<u8>>>) -> u64 {
+    let receiver = lock(receiver);
+    let mut discarded = 0_u64;
+    while receiver.try_recv().is_ok() {
+        discarded = discarded.saturating_add(1);
+    }
+    discarded
 }
 
 fn finalize_segment(
@@ -1001,5 +1023,13 @@ mod tests {
             next_mixed_audio_chunk(&mut game, &mut microphone, false, true),
             Some(vec![1, 0, 2, 0])
         );
+    }
+
+    #[test]
+    fn stale_audio_is_discarded_before_the_first_video_frame() {
+        let (sender, receiver) = sync_channel(4);
+        sender.send(vec![1]).unwrap();
+        sender.send(vec![2]).unwrap();
+        assert_eq!(drain_pending_audio(&Mutex::new(receiver)), 2);
     }
 }

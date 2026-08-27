@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { MatchRecord, Moment } from "../domain";
+import { momentTitle } from "../domain";
 import { developmentMatches } from "./developmentFixtures";
 
 type PersistedMatch = Omit<MatchRecord, "thumbnailTone" | "moments"> & {
@@ -48,6 +49,8 @@ export interface RecordingSettings {
   storagePath: string;
   accent: "mint" | "blue" | "purple" | "neutral";
   showClipNotifications: boolean;
+  manualReplayShortcut: string;
+  watermarkEnabled: boolean;
 }
 
 export interface AudioDevice {
@@ -75,18 +78,7 @@ function enrichMatch(match: PersistedMatch): MatchRecord {
         ?.metadata.weapon as string | undefined;
       return {
         ...moment,
-        title: ({
-          kill: "Kill",
-          headshot: "Headshot",
-          double_kill: "Double Kill",
-          triple_kill: "Triple Kill",
-          quad_kill: "Quad Kill",
-          five_kill: "Five Kill",
-          multi_kill: "Multi-kill",
-          clutch: "Clutch",
-          ace: "Ace",
-          other: "Highlight",
-        } as const)[moment.classification],
+        title: momentTitle(moment),
         weapon: weapon?.replace("weapon_", "") ?? "Unknown weapon",
         thumbnailTone: (["amber", "cyan", "violet", "green"] as const)[index % 4]!,
       };
@@ -168,6 +160,8 @@ const browserSettings: RecordingSettings = {
   storagePath: "OpenClip/Clips",
   accent: "mint",
   showClipNotifications: true,
+  manualReplayShortcut: "F8",
+  watermarkEnabled: false,
 };
 
 export async function getSettings(): Promise<RecordingSettings> {
@@ -188,6 +182,10 @@ export async function setStoragePath(path: string): Promise<RecordingSettings> {
 
 export async function openMomentClip(matchId: string, momentId: string): Promise<void> {
   await invoke("open_moment_clip", { matchId, momentId });
+}
+
+export async function getMomentThumbnail(matchId: string, momentId: string): Promise<number[]> {
+  return isTauri() ? invoke<number[]>("get_moment_thumbnail", { matchId, momentId }) : [];
 }
 
 export async function exportInterestingMoments(matchId: string, destination: string): Promise<string[]> {

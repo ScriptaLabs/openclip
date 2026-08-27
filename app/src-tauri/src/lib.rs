@@ -4,9 +4,13 @@
 mod automatic;
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use openclip_capture::{AudioDevice, RecorderService, list_microphone_devices};
+use openclip_capture::{
+    AudioDevice, RecorderService, generate_clip_thumbnail, list_microphone_devices,
+    thumbnail_path_for_clip,
+};
 use openclip_core::{
     Clip, GameEventType, GameStateUpdate, Match, MatchId, MatchRepository, Moment, RecordingStatus,
     Settings,
@@ -18,7 +22,7 @@ use openclip_cs2::{
 use openclip_storage::SqliteRepository;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
-use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
 use automatic::{AutomaticMomentResult, AutomaticMomentService};
@@ -160,15 +164,59 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-fn update_settings(settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
-    state
+fn update_settings(
+    mut settings: Settings,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let manual_replay_shortcut = settings.manual_replay_shortcut.trim().to_owned();
+    settings.manual_replay_shortcut = manual_replay_shortcut;
+    if settings.manual_replay_shortcut.is_empty() {
+        return Err("choose a manual replay shortcut".to_owned());
+    }
+    let mut repository = state
         .repository
         .lock()
-        .map_err(|_| "database lock was poisoned".to_owned())?
-        .save_settings(&settings)
+        .map_err(|_| "database lock was poisoned".to_owned())?;
+    let previous = repository
+        .load_settings()
         .map_err(|error| error.to_string())?;
+    if previous.manual_replay_shortcut != settings.manual_replay_shortcut {
+        replace_manual_replay_shortcut(
+            &app,
+            &previous.manual_replay_shortcut,
+            &settings.manual_replay_shortcut,
+        )?;
+    }
+    if let Err(error) = repository.save_settings(&settings) {
+        if previous.manual_replay_shortcut != settings.manual_replay_shortcut {
+            let _ = replace_manual_replay_shortcut(
+                &app,
+                &settings.manual_replay_shortcut,
+                &previous.manual_replay_shortcut,
+            );
+        }
+        return Err(error.to_string());
+    }
+    drop(repository);
     state.recorder.update_settings(settings.clone());
     state.automatic.update_settings(settings);
+    Ok(())
+}
+
+fn replace_manual_replay_shortcut(
+    app: &tauri::AppHandle,
+    previous: &str,
+    next: &str,
+) -> Result<(), String> {
+    let shortcuts = app.global_shortcut();
+    shortcuts
+        .register(next)
+        .map_err(|error| format!("could not register {next}: {error}"))?;
+    if let Err(error) = shortcuts.unregister(previous) {
+        let _ = shortcuts.unregister(next);
+        return Err(format!("could not replace {previous}: {error}"));
+    }
     Ok(())
 }
 
@@ -221,9 +269,46 @@ fn open_moment_clip(
 }
 
 #[tauri::command]
+fn get_moment_thumbnail(
+    match_id: MatchId,
+    moment_id: openclip_core::MomentId,
+    state: State<'_, AppState>,
+) -> Result<Vec<u8>, String> {
+    let game_match = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .get_match(match_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "match was not found".to_owned())?;
+    let clip = game_match
+        .moments
+        .iter()
+        .find(|moment| moment.id == moment_id)
+        .and_then(|moment| moment.clip_path.as_ref())
+        .ok_or_else(|| "this moment has no captured video".to_owned())?;
+    if !clip.is_file() {
+        return Err("the captured video file is no longer available".to_owned());
+    }
+    let mut thumbnail = thumbnail_path_for_clip(clip);
+    if !thumbnail.is_file() {
+        thumbnail = generate_clip_thumbnail(clip).map_err(|error| {
+            tracing::warn!(%error, %moment_id, path = %clip.display(), "could not generate requested clip thumbnail");
+            error.to_string()
+        })?;
+    }
+    let bytes = std::fs::read(&thumbnail).map_err(|error| error.to_string())?;
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err("the generated thumbnail exceeded the safety limit".to_owned());
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
 fn export_interesting_moments(
     match_id: MatchId,
     destination: PathBuf,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<PathBuf>, String> {
     let destination = validate_storage_directory(&destination)?;
@@ -234,6 +319,16 @@ fn export_interesting_moments(
         .get_match(match_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "match was not found".to_owned())?;
+    let watermark_enabled = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .load_settings()
+        .map_err(|error| error.to_string())?
+        .watermark_enabled;
+    let watermark = watermark_enabled
+        .then(|| watermark_asset_path(&app))
+        .transpose()?;
     let mut exported = Vec::new();
     for moment in game_match.moments.iter().filter(|moment| {
         moment.clip_path.is_some() && (moment.importance >= 10.0 || moment.is_favorite)
@@ -269,10 +364,90 @@ fn export_interesting_moments(
             occurred_at.format("%Y-%m-%d_%H%M%S")
         );
         let target = available_export_path(&destination, &base, "mp4");
-        std::fs::copy(source, &target).map_err(|error| error.to_string())?;
+        if let Some(watermark) = &watermark {
+            render_watermarked_export(source, &target, watermark)?;
+        } else {
+            std::fs::copy(source, &target).map_err(|error| error.to_string())?;
+        }
         exported.push(target);
     }
     Ok(exported)
+}
+
+fn watermark_asset_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let packaged = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join("assets/branding/watermark.mov");
+    let development =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/branding/watermark.mov");
+    [packaged, development]
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "the OpenClip watermark asset is missing".to_owned())
+}
+
+fn render_watermarked_export(source: &Path, target: &Path, watermark: &Path) -> Result<(), String> {
+    let media =
+        openclip_capture::validate_finalized_segment(source).map_err(|error| error.to_string())?;
+    // The final logo occupies only part of the transparent 400 px canvas, so a 25% canvas
+    // width produces a clearly visible (but still restrained) mark at 1080p.
+    let watermark_width = watermark_canvas_width(media.width);
+    let filter = format!(
+        "[1:v]format=rgba,scale={watermark_width}:-2,tpad=stop_mode=clone:stop_duration=86400[wm];[0:v][wm]overlay=W-w-W*0.025:H*0.025:shortest=1[v]"
+    );
+    let partial = target.with_extension("watermarked.mp4.partial");
+    let ffmpeg = std::env::var_os("OPENCLIP_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+    let mut command = Command::new(ffmpeg);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(source)
+        .arg("-i")
+        .arg(watermark)
+        .args(["-filter_complex", &filter, "-map", "[v]", "-map", "0:a?"])
+        .args([
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-cq",
+            "18",
+            "-b:v",
+            "0",
+        ])
+        .args([
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            "-f",
+            "mp4",
+        ])
+        .arg(&partial)
+        .output()
+        .map_err(|error| {
+            format!("watermark export requires FFmpeg (set OPENCLIP_FFMPEG): {error}")
+        })?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!(
+            "watermark export failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    std::fs::rename(&partial, target).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn watermark_canvas_width(video_width: u32) -> u32 {
+    (video_width.saturating_mul(25) / 100).max(2) & !1
 }
 
 fn validate_storage_directory(path: &Path) -> Result<PathBuf, String> {
@@ -399,9 +574,13 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!(%error, "could not emit automatic moment result");
         }
     });
-    let automatic =
-        AutomaticMomentService::start(repository.clone(), recorder.clone(), settings, notify)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let automatic = AutomaticMomentService::start(
+        repository.clone(),
+        recorder.clone(),
+        settings.clone(),
+        notify,
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
     let automatic_observer = automatic.clone();
     let observer = Arc::new(move |update: &GameStateUpdate| {
         emit_game_updates(&app_handle, update);
@@ -417,23 +596,24 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
-            .with_shortcuts(["F8"])?
-            .with_handler(|app, _shortcut, event| {
+            .with_shortcuts([settings.manual_replay_shortcut.as_str()])?
+            .with_handler(|app, shortcut, event| {
                 if event.state != ShortcutState::Pressed {
                     return;
                 }
                 let app = app.clone();
+                let shortcut = format!("{shortcut:?}");
                 tauri::async_runtime::spawn_blocking(move || {
                     let state = app.state::<AppState>();
                     match save_and_persist_replay(&state) {
                         Ok(clip) => {
-                            tracing::info!(path = %clip.path.display(), "F8 replay save completed");
+                            tracing::info!(path = %clip.path.display(), %shortcut, "manual replay save completed");
                             if let Err(error) = app.emit("replay_saved", clip) {
                                 tracing::warn!(%error, "could not emit replay saved event");
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(%error, "F8 replay save was not available");
+                            tracing::warn!(%error, %shortcut, "manual replay save was not available");
                         }
                     }
                 });
@@ -483,6 +663,7 @@ pub fn run() {
             update_settings,
             set_storage_path,
             open_moment_clip,
+            get_moment_thumbnail,
             export_interesting_moments
         ])
         .run(tauri::generate_context!())
@@ -526,5 +707,11 @@ mod tests {
         let validated = validate_storage_directory(&requested).expect("writable path");
         assert!(validated.is_dir());
         assert!(validated.read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn watermark_canvas_scales_to_one_quarter_of_the_clip() {
+        assert_eq!(watermark_canvas_width(1_920), 480);
+        assert_eq!(watermark_canvas_width(1_280), 320);
     }
 }

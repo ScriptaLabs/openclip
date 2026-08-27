@@ -6,10 +6,10 @@ license.workspace = true
 
 [dependencies]
 openclip-core = { path = "../openclip-core" }
+serde_json.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

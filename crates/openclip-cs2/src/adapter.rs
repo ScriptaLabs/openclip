@@ -16,6 +16,14 @@ pub struct Cs2Adapter {
     active_round: Option<Round>,
     last_kills: Option<u16>,
     last_round_headshots: Option<u16>,
+    last_weapon: Option<WeaponSnapshot>,
+    shots_since_last_kill: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WeaponSnapshot {
+    name: String,
+    ammo_clip: Option<i32>,
 }
 
 impl Cs2Adapter {
@@ -43,6 +51,7 @@ impl Cs2Adapter {
         self.ensure_session(&payload, timestamp, &mut update);
         self.update_match_lifecycle(&payload, timestamp, &mut update);
         self.update_round_lifecycle(&payload, timestamp, &mut update);
+        self.track_weapon_usage(&payload);
         self.detect_kills(&payload, timestamp, &mut update);
 
         self.previous = Some(payload);
@@ -224,6 +233,8 @@ impl Cs2Adapter {
                 update.rounds.push(round.clone());
                 self.active_round = Some(round);
                 self.last_round_headshots = round_headshots(payload);
+                self.last_weapon = None;
+                self.shots_since_last_kill = 0;
             }
         } else if phase == Some(RoundPhase::Over) {
             let winner = payload
@@ -266,10 +277,15 @@ impl Cs2Adapter {
             .map_or(0, |(current, previous)| current.saturating_sub(previous));
         let round_id = self.active_round.as_ref().map(|round| round.id);
         let weapon = payload.active_weapon().map(str::to_owned);
+        let one_shot_one_kill = kill_delta == 1 && self.shots_since_last_kill == 1;
         for index in 0..kill_delta {
             let is_headshot = index >= kill_delta.saturating_sub(headshot_delta);
-            let metadata =
-                kill_metadata(previous_kills + index + 1, is_headshot, weapon.as_deref());
+            let metadata = kill_metadata(
+                previous_kills + index + 1,
+                is_headshot,
+                weapon.as_deref(),
+                one_shot_one_kill,
+            );
             update.events.push(event_for(
                 game_match,
                 round_id,
@@ -297,9 +313,45 @@ impl Cs2Adapter {
             "kill detected"
         );
         self.last_kills = Some(current_kills);
+        self.shots_since_last_kill = 0;
         if let Some(headshots) = current_headshots {
             self.last_round_headshots = Some(headshots);
         }
+    }
+
+    fn track_weapon_usage(&mut self, payload: &GsiPayload) {
+        let current = payload.player.as_ref().and_then(|player| {
+            player
+                .weapons
+                .values()
+                .find(|weapon| weapon.state.as_deref() == Some("active"))
+                .and_then(|weapon| {
+                    Some(WeaponSnapshot {
+                        name: weapon.name.clone()?,
+                        ammo_clip: weapon.ammo_clip,
+                    })
+                })
+        });
+        let Some(current) = current else {
+            return;
+        };
+        if let Some(previous) = &self.last_weapon
+            && previous.name == current.name
+            && let (Some(previous_ammo), Some(current_ammo)) =
+                (previous.ammo_clip, current.ammo_clip)
+            && current_ammo < previous_ammo
+        {
+            self.shots_since_last_kill = self
+                .shots_since_last_kill
+                .saturating_add(u16::try_from(previous_ammo - current_ammo).unwrap_or(u16::MAX));
+        } else if self
+            .last_weapon
+            .as_ref()
+            .is_some_and(|previous| previous.name != current.name)
+        {
+            self.shots_since_last_kill = 0;
+        }
+        self.last_weapon = Some(current);
     }
 
     fn finish_round(
@@ -358,6 +410,8 @@ impl Cs2Adapter {
         update.matches.push(game_match);
         self.last_kills = None;
         self.last_round_headshots = None;
+        self.last_weapon = None;
+        self.shots_since_last_kill = 0;
     }
 }
 
@@ -387,14 +441,30 @@ fn event_for(
     }
 }
 
-fn kill_metadata(total_kills: u16, headshot: bool, weapon: Option<&str>) -> Value {
+fn kill_metadata(
+    total_kills: u16,
+    headshot: bool,
+    weapon: Option<&str>,
+    one_shot_one_kill: bool,
+) -> Value {
     let mut metadata = Map::new();
     metadata.insert("total_kills".to_owned(), Value::from(total_kills));
     metadata.insert("headshot".to_owned(), Value::from(headshot));
+    metadata.insert("oneShotOneKill".to_owned(), Value::from(one_shot_one_kill));
     if let Some(weapon) = weapon {
         metadata.insert("weapon".to_owned(), Value::from(weapon));
+        metadata.insert("knifeKill".to_owned(), Value::from(is_knife_weapon(weapon)));
+        metadata.insert("zeusKill".to_owned(), Value::from(is_zeus_weapon(weapon)));
     }
     Value::Object(metadata)
+}
+
+fn is_knife_weapon(weapon: &str) -> bool {
+    weapon.contains("knife") || weapon.contains("bayonet")
+}
+
+fn is_zeus_weapon(weapon: &str) -> bool {
+    matches!(weapon, "weapon_taser" | "weapon_zeus")
 }
 
 fn match_offset(game_match: &Match, timestamp: DateTime<Utc>) -> Option<u64> {

@@ -128,11 +128,8 @@ fn moment_worker(
                     match detector.ingest(event) {
                         Ok(finalized) => {
                             if let Some(moment) = finalized
-                                && let Some(mut range) = active_range.take()
+                                && let Some(range) = active_range.take()
                             {
-                                if detector.active().is_none() {
-                                    range.end_ms = range.end_ms.min(observed_ms);
-                                }
                                 send_finalize(finalize_sender, moment, range);
                             }
                         }

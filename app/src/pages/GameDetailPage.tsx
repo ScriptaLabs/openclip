@@ -1,13 +1,32 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, Check, ChevronRight, Download, Headphones, Play, Sparkles, Star } from "lucide-react";
 import type { MatchRecord, Moment } from "../domain";
 import { formatMode } from "../domain";
-import { exportInterestingMoments, openMomentClip } from "../data/matchRepository";
+import { exportInterestingMoments, getMomentThumbnail, openMomentClip } from "../data/matchRepository";
 
 interface GameDetailPageProps {
   match: MatchRecord;
   onBack: () => void;
+}
+
+function ClipThumbnail({ matchId, moment }: { matchId: string; moment: Moment }) {
+  const [source, setSource] = useState<string | null>(null);
+  useEffect(() => {
+    if (!moment.clipPath) return;
+    let active = true;
+    let objectUrl: string | null = null;
+    void getMomentThumbnail(matchId, moment.id).then((bytes) => {
+      if (!active || bytes.length === 0) return;
+      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/bmp" }));
+      setSource(objectUrl);
+    }).catch((error) => console.warn("Could not load clip thumbnail", error));
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [matchId, moment.clipPath, moment.id]);
+  return source ? <img alt="" className="moment-thumbnail-image" src={source} /> : <div className="thumbnail-grid" />;
 }
 
 function momentSummary(moment: Moment): string {
@@ -106,7 +125,7 @@ export function GameDetailPage({ match, onBack }: GameDetailPageProps) {
             return (
               <button className="highlight-row" disabled={!moment.clipPath} key={moment.id} onClick={() => void openMomentClip(match.id, moment.id).catch((error) => setMessage(String(error)))} type="button">
                 <div className={`moment-thumbnail tone-${moment.thumbnailTone}`}>
-                  <div className="thumbnail-grid" />
+                  <ClipThumbnail matchId={match.id} moment={moment} />
                   <span className="play-button"><Play size={16} fill="currentColor" /></span>
                   <small>0:{String(seconds).padStart(2, "0")}</small>
                 </div>

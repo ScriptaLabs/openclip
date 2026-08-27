@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Film } from "lucide-react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { MatchRecord } from "./domain";
+import type { MatchRecord, Moment } from "./domain";
+import { momentTitle } from "./domain";
 import {
   getCs2Status,
   getRecordingStatus,
@@ -56,11 +57,11 @@ function App() {
     const unlisten: Array<() => void> = [];
     if (isTauri()) {
       void listen("gsi_update", () => void refresh()).then((stop) => { unlisten.push(stop); });
-      void listen<{ moment: { classification: string }; captured: boolean }>("automatic_moment_finalized", async (event) => {
+      void listen<{ moment: Pick<Moment, "classification" | "events">; captured: boolean }>("automatic_moment_finalized", async (event) => {
         await refresh();
         const settings = await getSettings();
         if (event.payload.captured && settings.showClipNotifications) {
-          const label = event.payload.moment.classification.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ");
+          const label = momentTitle(event.payload.moment);
           setClipNotice(`Clip captured · ${label}`);
           window.setTimeout(() => setClipNotice(null), 4_000);
         }

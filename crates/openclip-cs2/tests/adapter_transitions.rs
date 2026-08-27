@@ -132,3 +132,36 @@ fn malformed_payload_returns_an_error_and_partial_payload_is_safe() {
             .is_empty()
     );
 }
+
+#[test]
+fn enriches_reliable_special_kill_metadata() {
+    let mut adapter = Cs2Adapter::default();
+    adapter.process(ROUND_LIVE).expect("live baseline");
+
+    let mut one_shot: Value = serde_json::from_slice(KILL_1).expect("fixture JSON");
+    one_shot["player"]["weapons"]["weapon_0"]["ammo_clip"] = Value::from(29);
+    let update = adapter
+        .process(&serde_json::to_vec(&one_shot).unwrap())
+        .expect("one-shot kill");
+    let kill = update
+        .events
+        .iter()
+        .find(|event| event.event_type == GameEventType::Kill)
+        .expect("kill event");
+    assert_eq!(kill.metadata["oneShotOneKill"], true);
+    assert_eq!(kill.metadata["headshot"], true);
+
+    let mut knife: Value = serde_json::from_slice(KILL_2).expect("fixture JSON");
+    knife["player"]["weapons"]["weapon_0"]["name"] = Value::from("weapon_knife_karambit");
+    knife["player"]["weapons"]["weapon_0"]["ammo_clip"] = Value::from(-1);
+    let update = adapter
+        .process(&serde_json::to_vec(&knife).unwrap())
+        .expect("knife kill");
+    let kill = update
+        .events
+        .iter()
+        .find(|event| event.event_type == GameEventType::Kill)
+        .expect("kill event");
+    assert_eq!(kill.metadata["knifeKill"], true);
+    assert_eq!(kill.metadata["zeusKill"], false);
+}

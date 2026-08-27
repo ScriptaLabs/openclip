@@ -252,9 +252,15 @@ impl WindowedMomentDetector {
         let kills = moment.events.iter().fold(0_u8, |count, event| {
             count.saturating_add(u8::from(event.event_type == GameEventType::Kill))
         });
-        let headshots = moment.events.iter().fold(0_u8, |count, event| {
+        let reported_headshots = moment.events.iter().fold(0_u8, |count, event| {
             count.saturating_add(u8::from(event.event_type == GameEventType::Headshot))
         });
+        let tagged_headshots = moment.events.iter().fold(0_u8, |count, event| {
+            count.saturating_add(u8::from(
+                event.event_type == GameEventType::Kill && metadata_flag(event, "headshot"),
+            ))
+        });
+        let headshots = reported_headshots.max(tagged_headshots);
 
         moment.classification = match kills {
             0 | 1 if headshots > 0 => MomentClassification::Headshot,
@@ -272,9 +278,54 @@ impl WindowedMomentDetector {
             4 => 40.0,
             _ => 60.0,
         };
-        moment.importance =
-            (f32::from(kills) * 10.0) + (f32::from(headshots) * 5.0) + multi_kill_bonus;
+        let special_bonus = moment
+            .events
+            .iter()
+            .filter(|event| event.event_type == GameEventType::Kill)
+            .map(special_kill_score)
+            .sum::<f32>();
+        moment.importance = (f32::from(kills) * 10.0)
+            + (f32::from(headshots) * 5.0)
+            + multi_kill_bonus
+            + special_bonus;
     }
+}
+
+fn metadata_flag(event: &GameEvent, name: &str) -> bool {
+    event
+        .metadata
+        .get(name)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn special_kill_score(event: &GameEvent) -> f32 {
+    let headshot = metadata_flag(event, "headshot");
+    let one_shot = metadata_flag(event, "oneShotOneKill");
+    let aerial = metadata_flag(event, "aerial");
+    let mut score = 0.0;
+    if one_shot {
+        score += 10.0;
+        if headshot {
+            score += 20.0;
+        }
+    }
+    if metadata_flag(event, "knifeKill") {
+        score += 25.0;
+    }
+    if metadata_flag(event, "zeusKill") {
+        score += 20.0;
+    }
+    if metadata_flag(event, "noScope") {
+        score += 15.0;
+    }
+    if aerial {
+        score += 15.0;
+        if headshot {
+            score += 10.0;
+        }
+    }
+    score
 }
 
 impl MomentDetector for WindowedMomentDetector {
@@ -296,12 +347,9 @@ impl MomentDetector for WindowedMomentDetector {
             _ => false,
         };
         if boundary {
-            if let (Some(active), Some(boundary_offset)) = (self.active.as_mut(), offset) {
-                active.end_offset_ms = active
-                    .end_offset_ms
-                    .min(boundary_offset)
-                    .max(active.start_offset_ms);
-            }
+            // A round or match boundary stops further merging, but it must not steal the
+            // post-roll already promised to the triggering event. Last-kill highlights are
+            // otherwise finalized before the kill animation reaches the encoded timeline.
             return Ok(self.active.take());
         }
         if !self.is_qualifying(&event) {
@@ -419,6 +467,18 @@ mod tests {
         }
     }
 
+    fn special_kill(match_id: MatchId, offset: u64) -> GameEvent {
+        let mut event = event(match_id, offset, GameEventType::Kill);
+        event.metadata = json!({
+            "weapon": "weapon_ssg08",
+            "headshot": true,
+            "oneShotOneKill": true,
+            "noScope": true,
+            "aerial": true
+        });
+        event
+    }
+
     #[test]
     fn nearby_kills_merge_and_extend_the_window() {
         let match_id = MatchId::new();
@@ -514,7 +574,7 @@ mod tests {
         let mut detector = WindowedMomentDetector::new(10_000, 5_000);
         detector.ingest(kill).unwrap();
         let finalized = detector.ingest(boundary).unwrap().expect("finalized");
-        assert_eq!(finalized.end_offset_ms, 22_000);
+        assert_eq!(finalized.end_offset_ms, 25_000);
         assert!(detector.active().is_none());
     }
 
@@ -545,5 +605,15 @@ mod tests {
             .ingest(event(MatchId::new(), 1_000, GameEventType::Kill))
             .unwrap();
         assert!(detector.active().is_none());
+    }
+
+    #[test]
+    fn combinable_special_kills_receive_additive_importance() {
+        let match_id = MatchId::new();
+        let mut detector = WindowedMomentDetector::new(10_000, 5_000);
+        detector.ingest(special_kill(match_id, 20_000)).unwrap();
+        let moment = detector.flush().expect("special moment");
+        assert_eq!(moment.classification, MomentClassification::Headshot);
+        assert!((moment.importance - 85.0).abs() < f32::EPSILON);
     }
 }

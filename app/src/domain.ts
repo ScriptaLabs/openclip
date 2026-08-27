@@ -92,3 +92,28 @@ export function getMatchStats(match: MatchRecord): MatchStats {
 export function formatMode(mode: MatchMode): string {
   return mode === "unknown" ? "Unknown mode" : mode[0]!.toUpperCase() + mode.slice(1);
 }
+
+function eventFlag(event: GameEvent, name: string): boolean {
+  return event.metadata[name] === true;
+}
+
+export function momentTitle(moment: Pick<Moment, "classification" | "events">): string {
+  const kill = moment.events.find((event) => event.eventType === "kill");
+  const base = ({
+    kill: "Kill", headshot: "Headshot", double_kill: "Double Kill", triple_kill: "Triple Kill",
+    quad_kill: "Quad Kill", five_kill: "Five Kill", multi_kill: "Multi-kill", clutch: "Clutch",
+    ace: "Ace", other: "Highlight",
+  } as const)[moment.classification];
+  if (!kill || moment.events.filter((event) => event.eventType === "kill").length > 1) return base;
+  const traits = [
+    eventFlag(kill, "aerial") ? "Aerial" : "",
+    eventFlag(kill, "noScope") ? "No-scope" : "",
+    eventFlag(kill, "oneShotOneKill") ? "One-shot-one-kill" : "",
+  ].filter(Boolean);
+  const finish = eventFlag(kill, "knifeKill")
+    ? "Knife Kill"
+    : eventFlag(kill, "zeusKill")
+      ? "Zeus Kill"
+      : eventFlag(kill, "headshot") ? "Headshot" : base;
+  return [...traits, finish].join(" · ");
+}

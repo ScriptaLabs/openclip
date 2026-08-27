@@ -13,10 +13,15 @@ mod media;
 mod nvenc_backend;
 mod recorder;
 #[cfg(windows)]
+#[allow(unsafe_code)]
+mod thumbnail;
+#[cfg(windows)]
 mod windows;
 pub use config::{EncoderConfig, encoder_config};
 pub use media::{FinalizedMediaInfo, remux_segments, validate_finalized_segment};
 pub use recorder::RecorderService;
+#[cfg(windows)]
+pub use thumbnail::{generate_clip_thumbnail, thumbnail_path_for_clip};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

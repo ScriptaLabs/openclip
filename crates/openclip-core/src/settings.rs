@@ -51,6 +51,10 @@ pub struct Settings {
     pub accent: AccentPreference,
     #[serde(default = "default_true")]
     pub show_clip_notifications: bool,
+    #[serde(default = "default_manual_replay_shortcut")]
+    pub manual_replay_shortcut: String,
+    #[serde(default)]
+    pub watermark_enabled: bool,
 }
 
 impl Default for Settings {
@@ -71,12 +75,18 @@ impl Default for Settings {
             storage_path: PathBuf::from("OpenClip/Clips"),
             accent: AccentPreference::Mint,
             show_clip_notifications: true,
+            manual_replay_shortcut: default_manual_replay_shortcut(),
+            watermark_enabled: false,
         }
     }
 }
 
 const fn default_true() -> bool {
     true
+}
+
+fn default_manual_replay_shortcut() -> String {
+    "F8".to_owned()
 }
 
 #[cfg(test)]
@@ -104,5 +114,7 @@ mod tests {
         .expect("legacy settings should deserialize");
 
         assert_eq!(settings.microphone_device_id, None);
+        assert_eq!(settings.manual_replay_shortcut, "F8");
+        assert!(!settings.watermark_enabled);
     }
 }
