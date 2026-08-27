@@ -7,6 +7,7 @@ pub struct EncoderConfig {
     pub frames_per_second: u16,
     pub bitrate: u32,
     pub capture_game_audio: bool,
+    pub capture_microphone: bool,
 }
 
 #[must_use]
@@ -39,6 +40,7 @@ pub fn encoder_config(settings: &Settings, source_width: u32, source_height: u32
         frames_per_second: settings.frames_per_second.clamp(1, 60),
         bitrate,
         capture_game_audio: settings.capture_game_audio,
+        capture_microphone: settings.capture_microphone,
     }
 }
 

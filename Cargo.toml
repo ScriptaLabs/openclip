@@ -28,6 +28,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.23.0", features = ["serde", "v4"] }
 mp4io = "0.1.2"
+nvenc = "0.1.0"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
 
 [workspace.dependencies.windows-capture]
 version = "2.0.1"
@@ -36,7 +38,8 @@ version = "2.0.1"
 version = "0.24.0"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Low-level platform backends may opt into narrowly documented unsafe operations.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -67,7 +67,8 @@ clips.
 
 ## Known limitations
 
-- Microphone enable/device settings are persisted, but microphone mixing is not implemented yet.
+- Optional microphone capture uses the selected endpoint and mixes into the same AAC clip track as
+  CS2 process audio.
 - Five Kill is intentionally conservative; true Ace detection needs stronger round/opponent proof.
 - Automatic moments require GSI and capture clocks to be active in the same desktop process.
 - Export copies separate clips; montage rendering remains deferred.

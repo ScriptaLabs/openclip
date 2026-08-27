@@ -9,6 +9,8 @@ use serde::Serialize;
 
 mod config;
 mod media;
+#[cfg(windows)]
+mod nvenc_backend;
 mod recorder;
 #[cfg(windows)]
 mod windows;

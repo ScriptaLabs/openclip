@@ -9,14 +9,18 @@ separate clip records which can optionally reference the active GSI match.
 
 ## Current milestone
 
-Milestone 4 connects CS2 events to automatic, match-organized highlights:
+Milestone 5 replaces the video transcoder with a direct NVIDIA NVENC pipeline built for stable,
+edit-ready replay timing while retaining Milestone 4 automatic highlights:
 
 - Windows Graphics Capture targeting the largest visible `cs2.exe` window
-- GPU-surface input to Windows Media Foundation H.264 with hardware acceleration requested and an
-  NVIDIA driver/NVENC capability gate
-- process-tree WASAPI loopback audio for CS2, encoded as AAC at 48 kHz stereo
-- independently finalized approximately two-second MP4 segments; only parsed, sync-sample-starting
-  segments enter the rolling buffer
+- WGC D3D11 textures registered directly with a dynamically loaded NVIDIA Encode API session;
+  there is no per-frame CPU pixel readback or Media Foundation video encoder
+- one continuous NVENC session with deterministic 30/60 FPS pacing, persistent texture
+  registrations, low-latency P4 encoding, and GPU video-processor scaling
+- process-tree WASAPI game audio plus optional selected-device microphone capture/mixing, encoded as
+  AAC at 48 kHz stereo
+- independently finalized two-second MP4 segments with exact video/audio clocks; every segment is
+  verified to contain a real H.264 IDR rather than trusting container sync metadata
 - hard duration and byte bounds, keyframe-safe selection, and encoded-sample MP4 remuxing on save
 - F8 global Save Replay plus the shared `save_replay` Tauri command
 - event-driven moments with configurable pre/post-roll, same-round multi-kill merging, deterministic
@@ -25,14 +29,11 @@ Milestone 4 connects CS2 events to automatic, match-organized highlights:
 - separate persistent manual and automatic clip sources; F8 remains independent
 - real match-detail highlights/timeline markers, OS playback, and per-match interesting-moment export
 - native validated storage selection used by future manual and automatic clips
-- launch/close/relaunch monitoring, resolution-change reset, and local capture diagnostics
+- launch/close/relaunch monitoring, live-settings restart, resolution-change reset, crash recovery,
+  and source/encoded cadence plus encode-latency diagnostics
 - persistent quality, resolution, frame-rate, game-audio, and microphone device preferences
 - mint/blue/purple/neutral accents and optional restrained clip-captured feedback
 - the supplied banner as the sole sidebar brand and the supplied monochrome app icon
-
-Microphone mixing remains intentionally deferred. The UI enumerates active Windows microphone
-endpoints and persists the enable/device preference without claiming that microphone audio is
-already present in clips.
 
 ## Architecture
 
@@ -64,6 +65,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the dependency rules and 
 ## Prerequisites
 
 - Windows 10 or 11
+- an NVIDIA GPU/driver exposing NVENC H.264 (`nvEncodeAPI64.dll`)
 - Rust stable toolchain
 - Node.js 22 or newer and npm
 - Microsoft C++ Build Tools and WebView2 (required by Tauri on Windows)
@@ -142,8 +144,9 @@ SQLite stores metadata only. Captured video remains as ordinary files on disk.
 1. **Repository and core domain** — complete
 2. **CS2 GSI listener, installer, state differencing, persistence, and live GUI data** — complete
 3. **Windows capture, hardware H.264, bounded manual replay buffer, and F8 save** — complete
-4. **automatic merged moments, ranged extraction, real match UI, export, and desktop polish** — current
-5. montage assembly and editing foundations
+4. **automatic merged moments, ranged extraction, real match UI, export, and desktop polish** — complete
+5. **direct NVENC, deterministic pacing, crash-safe IDR segments, and microphone mixing** — current
+6. montage assembly and editing foundations
 
 OpenClip is licensed under either the MIT License or Apache License 2.0. License files will be added
 before the first public release.

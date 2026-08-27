@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use openclip_core::MatchId;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GsiPayload {
@@ -10,8 +10,25 @@ pub struct GsiPayload {
     pub map: Option<GsiMap>,
     pub round: Option<GsiRound>,
     pub player: Option<GsiPlayer>,
+    #[serde(default, deserialize_with = "deserialize_optional_lossy")]
     pub previously: Option<GsiDelta>,
+    #[serde(default, deserialize_with = "deserialize_optional_lossy")]
     pub added: Option<GsiDelta>,
+}
+
+/// CS2's `previously`/`added` fragments are best-effort hints and occasionally
+/// contain boolean sentinels or mixed leaf types. A malformed delta must not
+/// discard the authoritative current map/player state in the same payload.
+fn deserialize_optional_lossy<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value(value).ok())
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -223,5 +240,28 @@ impl Default for Cs2Status {
             last_update_at: None,
             message: "Waiting for Counter-Strike 2".to_owned(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GsiPayload;
+
+    #[test]
+    fn malformed_delta_does_not_discard_current_state() {
+        let payload: GsiPayload = serde_json::from_str(
+            r#"{
+                "map": { "name": "workshop/3070923343/de_test", "phase": "live" },
+                "player": { "match_stats": { "kills": 4 } },
+                "previously": { "round": { "win_team": true } },
+                "added": true
+            }"#,
+        )
+        .expect("authoritative state remains parseable");
+
+        assert_eq!(payload.map_name(), Some("workshop/3070923343/de_test"));
+        assert_eq!(payload.player.unwrap().match_stats.unwrap().kills, Some(4));
+        assert!(payload.previously.is_none());
+        assert!(payload.added.is_none());
     }
 }

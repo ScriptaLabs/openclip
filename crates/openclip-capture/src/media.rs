@@ -33,6 +33,11 @@ pub fn validate_finalized_segment(path: &Path) -> Result<FinalizedMediaInfo> {
             "finalized segment does not begin with an H.264 sync sample".to_owned(),
         ));
     }
+    if !h264_sample_contains_idr(first.data) {
+        return Err(OpenClipError::Capture(
+            "finalized segment sync sample does not contain an H.264 IDR slice".to_owned(),
+        ));
+    }
     let Some(SampleEntry::Video(entry)) = video.sample_entry() else {
         unreachable!("video track was selected above");
     };
@@ -54,6 +59,25 @@ pub fn validate_finalized_segment(path: &Path) -> Result<FinalizedMediaInfo> {
                 && track.samples().next().is_some_and(|sample| sample.is_ok())
         }),
     })
+}
+
+fn h264_sample_contains_idr(sample: &[u8]) -> bool {
+    let mut cursor = 0;
+    while cursor + 4 <= sample.len() {
+        let length = u32::from_be_bytes(sample[cursor..cursor + 4].try_into().unwrap_or_default());
+        cursor += 4;
+        let Ok(length) = usize::try_from(length) else {
+            return false;
+        };
+        if length == 0 || cursor + length > sample.len() {
+            return false;
+        }
+        if sample[cursor] & 0x1f == 5 {
+            return true;
+        }
+        cursor += length;
+    }
+    false
 }
 
 /// Remuxes independent MP4 segments into one MP4 without decoding or re-encoding samples.
@@ -121,6 +145,103 @@ pub fn remux_segments(paths: &[PathBuf], output: &Path) -> Result<FinalizedMedia
     let info = validate_finalized_segment(&partial)?;
     std::fs::rename(&partial, output).map_err(capture_error)?;
     Ok(info)
+}
+
+/// Combines an already-encoded NVENC video MP4 with an independently encoded AAC MP4.
+/// Samples are copied verbatim; no decode or re-encode occurs.
+pub(crate) fn mux_video_with_audio(
+    video_bytes: &[u8],
+    audio_path: Option<&Path>,
+    output: &Path,
+) -> Result<FinalizedMediaInfo> {
+    let video = Mp4::parse(video_bytes).map_err(capture_error)?;
+    let audio_bytes = audio_path
+        .map(std::fs::read)
+        .transpose()
+        .map_err(capture_error)?;
+    let audio = audio_bytes
+        .as_deref()
+        .map(Mp4::parse)
+        .transpose()
+        .map_err(capture_error)?;
+    let mut writer = Writer::new(WriterConfig::default());
+    let video_clock = video
+        .tracks()
+        .iter()
+        .find(|track| matches!(track.sample_entry(), Some(SampleEntry::Video(_))))
+        .map(|track| Ok((track_duration(track)?, track.timescale())))
+        .transpose()?
+        .ok_or_else(|| OpenClipError::Capture("NVENC segment has no video track".to_owned()))?;
+
+    for track in video
+        .tracks()
+        .iter()
+        .filter(|track| matches!(track.sample_entry(), Some(SampleEntry::Video(_))))
+    {
+        copy_track(track, &mut writer, None)?;
+    }
+    if let Some(audio) = &audio {
+        for track in audio
+            .tracks()
+            .iter()
+            .filter(|track| matches!(track.sample_entry(), Some(SampleEntry::Audio(_))))
+        {
+            let audio_limit = video_clock.0.saturating_mul(u64::from(track.timescale()))
+                / u64::from(video_clock.1);
+            copy_track(track, &mut writer, Some(audio_limit))?;
+        }
+    }
+
+    let bytes = writer.finalize().map_err(capture_error)?;
+    std::fs::write(output, bytes).map_err(capture_error)?;
+    validate_finalized_segment(output)
+}
+
+fn copy_track(
+    track: &mp4io::Track<'_>,
+    writer: &mut Writer,
+    duration_limit: Option<u64>,
+) -> Result<()> {
+    let params = track_params(track)?
+        .ok_or_else(|| OpenClipError::Capture("cannot copy an unsupported MP4 track".to_owned()))?;
+    let output = writer.add_track(params);
+    let mut written_duration = 0_u64;
+    for sample in track.samples() {
+        let sample = sample.map_err(capture_error)?;
+        let remaining =
+            duration_limit.map_or(u64::MAX, |limit| limit.saturating_sub(written_duration));
+        if remaining == 0 {
+            break;
+        }
+        let duration = sample
+            .duration
+            .min(u32::try_from(remaining).unwrap_or(u32::MAX));
+        let dts = i64::try_from(sample.dts).map_err(capture_error)?;
+        writer
+            .write_sample(
+                output,
+                InputSample {
+                    data: sample.data,
+                    duration,
+                    composition_offset: i32::try_from(sample.cts - dts).map_err(capture_error)?,
+                    is_sync: sample.is_sync,
+                },
+            )
+            .map_err(capture_error)?;
+        written_duration = written_duration.saturating_add(u64::from(duration));
+    }
+    Ok(())
+}
+
+fn track_duration(track: &mp4io::Track<'_>) -> Result<u64> {
+    track
+        .samples()
+        .map(|sample| sample.map(|sample| u64::from(sample.duration)))
+        .try_fold(0_u64, |duration, sample| {
+            sample
+                .map(|sample| duration.saturating_add(sample))
+                .map_err(capture_error)
+        })
 }
 
 fn sample_entry_fingerprint(entry: Option<&SampleEntry>) -> String {
@@ -237,5 +358,86 @@ mod tests {
         let path = directory.path().join("unsafe.mp4");
         write_test_segment(&path, false);
         assert!(validate_finalized_segment(&path).is_err());
+    }
+
+    #[test]
+    fn p_slice_mislabeled_as_sync_is_rejected() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("false-sync.mp4");
+        let mut writer = Writer::new(WriterConfig::default());
+        let video = writer.add_track(TrackParams::video(Codec::H264, 1_920, 1_080));
+        writer
+            .write_sample(
+                video,
+                InputSample {
+                    data: &[0, 0, 0, 1, 0x41],
+                    duration: 1_500,
+                    composition_offset: 0,
+                    is_sync: true,
+                },
+            )
+            .unwrap();
+        std::fs::write(&path, writer.finalize().unwrap()).unwrap();
+        assert!(validate_finalized_segment(&path).is_err());
+    }
+
+    #[test]
+    fn aac_is_trimmed_to_the_exact_video_segment_clock() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let audio_path = directory.path().join("audio.m4a");
+        let output = directory.path().join("muxed.mp4");
+
+        let mut video_writer = Writer::new(WriterConfig::default());
+        let video =
+            video_writer.add_track(TrackParams::video(Codec::H264, 1_920, 1_080).timescale(90_000));
+        for index in 0..120 {
+            video_writer
+                .write_sample(
+                    video,
+                    InputSample {
+                        data: if index == 0 {
+                            &[0, 0, 0, 1, 0x65]
+                        } else {
+                            &[0, 0, 0, 1, 0x41]
+                        },
+                        duration: 1_500,
+                        composition_offset: 0,
+                        is_sync: index == 0,
+                    },
+                )
+                .unwrap();
+        }
+        let video_bytes = video_writer.finalize().unwrap();
+
+        let mut audio_writer = Writer::new(WriterConfig::default());
+        let audio = audio_writer.add_track(
+            TrackParams::audio(Codec::Aac, 2, 48_000)
+                .timescale(48_000)
+                .aac_config(2, 48_000, 2, [0x11, 0x90]),
+        );
+        for _ in 0..95 {
+            audio_writer
+                .write_sample(
+                    audio,
+                    InputSample {
+                        data: &[0xaa],
+                        duration: 1_024,
+                        composition_offset: 0,
+                        is_sync: true,
+                    },
+                )
+                .unwrap();
+        }
+        std::fs::write(&audio_path, audio_writer.finalize().unwrap()).unwrap();
+
+        mux_video_with_audio(&video_bytes, Some(&audio_path), &output).unwrap();
+        let bytes = std::fs::read(output).unwrap();
+        let mp4 = Mp4::parse(&bytes).unwrap();
+        let durations = mp4
+            .tracks()
+            .iter()
+            .map(|track| track_duration(track).unwrap() * 1_000 / u64::from(track.timescale()))
+            .collect::<Vec<_>>();
+        assert_eq!(durations, [2_000, 2_000]);
     }
 }

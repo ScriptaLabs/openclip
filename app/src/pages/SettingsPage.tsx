@@ -78,7 +78,7 @@ export function SettingsPage() {
       </section>
 
       <section className="settings-panel">
-        <div className="settings-heading"><h2>Recording</h2><p>Changes are persisted and applied to the next encoded segment.</p></div>
+        <div className="settings-heading"><h2>Recording</h2><p>Capture changes restart the replay window so every saved clip stays compatible.</p></div>
         <div className="settings-grid">
           <label><span>Quality</span><select disabled={!settings} value={settings?.quality ?? "high"} onChange={(event) => settings && save({ ...settings, quality: event.target.value as RecordingSettings["quality"] })}><option value="performance">Performance</option><option value="high">High</option><option value="ultra">Ultra</option></select></label>
           <label><span>Resolution</span><select disabled={!settings} value={settings?.resolution ?? "game_resolution"} onChange={(event) => settings && save({ ...settings, resolution: event.target.value as RecordingSettings["resolution"] })}><option value="game_resolution">Game resolution</option><option value="p1080">1080p</option><option value="p1440">1440p</option></select></label>
@@ -90,9 +90,9 @@ export function SettingsPage() {
       </section>
 
       <section className="settings-panel">
-        <div className="settings-heading"><h2>Microphone</h2><p>Choose the preference now; microphone mixing remains deferred.</p></div>
+        <div className="settings-heading"><h2>Microphone</h2><p>Mix an input device with CS2 audio in captured clips.</p></div>
         <div className="toggle-list">
-          <label className="toggle-row"><span><strong>Capture microphone</strong><small>Saved for the upcoming microphone capture backend</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureMicrophone ?? false} onChange={(event) => settings && save({ ...settings, captureMicrophone: event.target.checked })} /><i /></label>
+          <label className="toggle-row"><span><strong>Capture microphone</strong><small>Recorded and mixed into the clip's AAC track</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureMicrophone ?? false} onChange={(event) => settings && save({ ...settings, captureMicrophone: event.target.checked })} /><i /></label>
         </div>
         <div className="settings-grid microphone-grid">
           <label><span>Input device</span><select disabled={!settings || !settings.captureMicrophone} value={settings?.microphoneDeviceId ?? ""} onChange={(event) => settings && save({ ...settings, microphoneDeviceId: event.target.value || null })}><option value="">Windows default microphone</option>{microphones.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select></label>

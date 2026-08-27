@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ pub(crate) struct SharedRecorder {
     pub save_lock: Mutex<()>,
     pub pinned_segments: Mutex<HashSet<PathBuf>>,
     pub deferred_deletes: Mutex<Vec<PathBuf>>,
+    pub settings_generation: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -58,6 +60,7 @@ impl RecorderService {
             save_lock: Mutex::new(()),
             pinned_segments: Mutex::new(HashSet::new()),
             deferred_deletes: Mutex::new(Vec::new()),
+            settings_generation: AtomicU64::new(0),
         });
         Ok(Self {
             shared,
@@ -88,7 +91,15 @@ impl RecorderService {
     }
 
     pub fn update_settings(&self, settings: Settings) {
-        *write(&self.shared.settings) = settings;
+        let mut current = write(&self.shared.settings);
+        let restart_capture = capture_pipeline_changed(&current, &settings);
+        *current = settings;
+        drop(current);
+        if restart_capture {
+            self.shared
+                .settings_generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     #[must_use]
@@ -259,8 +270,8 @@ impl RecorderService {
             height: media.height,
             frames_per_second: settings.frames_per_second.min(60),
             codec: "h264".to_owned(),
-            encoder: "windows_media_foundation_hardware".to_owned(),
-            has_game_audio: media.has_audio,
+            encoder: "nvidia_nvenc_directx11".to_owned(),
+            has_game_audio: settings.capture_game_audio && media.has_audio,
         })
     }
 
@@ -289,6 +300,15 @@ impl RecorderService {
             }
         }
     }
+}
+
+fn capture_pipeline_changed(previous: &Settings, next: &Settings) -> bool {
+    previous.quality != next.quality
+        || previous.resolution != next.resolution
+        || previous.frames_per_second != next.frames_per_second
+        || previous.capture_game_audio != next.capture_game_audio
+        || previous.capture_microphone != next.capture_microphone
+        || previous.microphone_device_id != next.microphone_device_id
 }
 
 pub(crate) fn waiting_status() -> RecordingStatus {
@@ -514,5 +534,29 @@ mod tests {
         let clip = recorder.save_replay(None).expect("manual clip saves");
         assert_eq!(clip.source, ClipSource::Manual);
         assert_eq!(clip.moment_id, None);
+    }
+
+    #[test]
+    fn only_capture_pipeline_changes_restart_the_capture_session() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let recorder = RecorderService::new(directory.path(), Settings::default()).unwrap();
+
+        let presentation_change = Settings {
+            show_clip_notifications: false,
+            ..Settings::default()
+        };
+        recorder.update_settings(presentation_change);
+        assert_eq!(
+            recorder.shared.settings_generation.load(Ordering::Acquire),
+            0
+        );
+
+        let mut microphone_change = read(&recorder.shared.settings).clone();
+        microphone_change.capture_microphone = true;
+        recorder.update_settings(microphone_change);
+        assert_eq!(
+            recorder.shared.settings_generation.load(Ordering::Acquire),
+            1
+        );
     }
 }

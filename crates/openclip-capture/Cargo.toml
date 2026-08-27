@@ -14,7 +14,9 @@ tracing.workspace = true
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+nvenc.workspace = true
 wasapi.workspace = true
+windows.workspace = true
 windows-capture.workspace = true
 
 [dev-dependencies]

@@ -12,7 +12,6 @@ use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat, initial
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
-    VideoSettingsSubType,
 };
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
@@ -24,16 +23,17 @@ use windows_capture::window::Window;
 
 use crate::AudioDevice;
 use crate::config::{EncoderConfig, encoder_config};
+use crate::media::mux_video_with_audio;
+use crate::nvenc_backend::{DirectNvencEncoder, FramePacer, VideoSegment};
 use crate::recorder::{SharedRecorder, lock, read, set_status, waiting_status};
-use crate::validate_finalized_segment;
 
-const SEGMENT_DURATION: Duration = Duration::from_secs(2);
 const AUDIO_CHANNEL_CAPACITY: usize = 128;
 const AUDIO_CHUNK_FRAMES: usize = 480;
+const AUDIO_MIX_JITTER_CHUNKS: usize = 2;
 
 type HandlerError = Box<dyn std::error::Error + Send + Sync>;
-type PreparedResult = std::result::Result<PreparedSegment, String>;
-type EncoderFactory = (
+type PreparedResult = std::result::Result<PreparedAudioSegment, String>;
+type AudioEncoderFactory = (
     SyncSender<(u32, u32)>,
     Receiver<PreparedResult>,
     thread::JoinHandle<()>,
@@ -82,20 +82,22 @@ struct HandlerFlags {
     audio_error: Arc<Mutex<Option<String>>>,
     finalizer: Sender<FinalizationJob>,
     generation: Arc<AtomicU64>,
-    encoder_request: SyncSender<(u32, u32)>,
-    prepared_encoder: Arc<Mutex<Receiver<PreparedResult>>>,
+    audio_encoder_request: SyncSender<(u32, u32)>,
+    prepared_audio_encoder: Arc<Mutex<Receiver<PreparedResult>>>,
 }
 
-struct PreparedSegment {
-    encoder: VideoEncoder,
-    partial_path: PathBuf,
+struct PreparedAudioSegment {
+    encoder: Option<VideoEncoder>,
+    path: Option<PathBuf>,
     source_size: (u32, u32),
     config: EncoderConfig,
     init_ms: u128,
 }
 
 struct FinalizationJob {
-    encoder: VideoEncoder,
+    video: VideoSegment,
+    audio_encoder: Option<VideoEncoder>,
+    audio_path: Option<PathBuf>,
     partial_path: PathBuf,
     started_at_ms: u64,
     generation: u64,
@@ -104,12 +106,17 @@ struct FinalizationJob {
 
 struct Cs2CaptureHandler {
     flags: HandlerFlags,
-    encoder: Option<VideoEncoder>,
-    partial_path: Option<PathBuf>,
-    segment_started: Option<Instant>,
+    encoder: Option<DirectNvencEncoder>,
+    pacer: Option<FramePacer>,
+    audio_segment: Option<PreparedAudioSegment>,
     segment_started_at_ms: u64,
     source_size: Option<(u32, u32)>,
     frames: u64,
+    encoded_frames: u64,
+    repeated_frames: u64,
+    skipped_early_frames: u64,
+    encode_micros: u128,
+    max_encode_micros: u128,
     dropped_frames: u64,
     diagnostics_started: Instant,
     generation: u64,
@@ -124,11 +131,16 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
         Ok(Self {
             flags: ctx.flags,
             encoder: None,
-            partial_path: None,
-            segment_started: None,
+            pacer: None,
+            audio_segment: None,
             segment_started_at_ms: 0,
             source_size: None,
             frames: 0,
+            encoded_frames: 0,
+            repeated_frames: 0,
+            skipped_early_frames: 0,
+            encode_micros: 0,
+            max_encode_micros: 0,
             dropped_frames: 0,
             diagnostics_started: Instant::now(),
             generation,
@@ -144,22 +156,47 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
         let source_changed = self
             .source_size
             .is_some_and(|previous| previous != source_size);
-        let segment_expired = self
-            .segment_started
-            .is_some_and(|started| started.elapsed() >= SEGMENT_DURATION);
-        if self.encoder.is_none() || source_changed || segment_expired {
-            self.rotate(source_size, source_changed)?;
+        if self.encoder.is_none() || source_changed {
+            self.initialize(frame, source_size, source_changed)?;
         }
 
         if let Some(encoder) = self.encoder.as_mut() {
             loop {
                 let audio = lock(&self.flags.audio_receiver).try_recv();
                 match audio {
-                    Ok(bytes) => encoder.send_audio_buffer(&bytes, 0)?,
+                    Ok(bytes) => {
+                        if let Some(audio) = self
+                            .audio_segment
+                            .as_mut()
+                            .and_then(|segment| segment.encoder.as_mut())
+                        {
+                            audio.send_audio_buffer(&bytes, 0)?;
+                        }
+                    }
                     Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                 }
             }
-            encoder.send_frame(frame)?;
+            let timestamp = u64::try_from(frame.timestamp()?.Duration).unwrap_or_default();
+            let copies = self
+                .pacer
+                .as_mut()
+                .expect("NVENC and pacer are initialized together")
+                .frames_due(timestamp);
+            let encode_started = Instant::now();
+            if let Some(segment) = encoder.encode_frame(frame, copies)? {
+                self.queue_segment_finalization(segment)?;
+                self.prepare_next_audio(source_size)?;
+            }
+            let elapsed_micros = encode_started.elapsed().as_micros();
+            self.encode_micros = self.encode_micros.saturating_add(elapsed_micros);
+            self.max_encode_micros = self.max_encode_micros.max(elapsed_micros);
+            self.encoded_frames = self.encoded_frames.saturating_add(u64::from(copies));
+            self.repeated_frames = self
+                .repeated_frames
+                .saturating_add(u64::from(copies.saturating_sub(1)));
+            self.skipped_early_frames = self
+                .skipped_early_frames
+                .saturating_add(u64::from(copies == 0));
             self.frames = self.frames.saturating_add(1);
         } else {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
@@ -169,10 +206,21 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
             let seconds = self.diagnostics_started.elapsed().as_secs_f64();
             tracing::info!(
                 capture_fps = f64::from(u32::try_from(self.frames).unwrap_or(u32::MAX)) / seconds,
+                encoded_fps =
+                    f64::from(u32::try_from(self.encoded_frames).unwrap_or(u32::MAX)) / seconds,
+                repeated_frames = self.repeated_frames,
+                skipped_early_frames = self.skipped_early_frames,
+                average_encode_micros = self.encode_micros / u128::from(self.frames.max(1)),
+                max_encode_micros = self.max_encode_micros,
                 dropped_frames = self.dropped_frames,
                 "capture diagnostics"
             );
             self.frames = 0;
+            self.encoded_frames = 0;
+            self.repeated_frames = 0;
+            self.skipped_early_frames = 0;
+            self.encode_micros = 0;
+            self.max_encode_micros = 0;
             self.dropped_frames = 0;
             self.diagnostics_started = Instant::now();
         }
@@ -180,22 +228,28 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
     }
 
     fn on_closed(&mut self) -> std::result::Result<(), Self::Error> {
-        self.queue_segment_finalization()?;
+        if let Some(mut encoder) = self.encoder.take()
+            && let Some(segment) = encoder.finish_segment()?
+        {
+            self.queue_segment_finalization(segment)?;
+        }
         tracing::info!("CS2 capture item closed");
         Ok(())
     }
 }
 
 impl Cs2CaptureHandler {
-    fn rotate(
+    fn initialize(
         &mut self,
+        frame: &Frame<'_>,
         source_size: (u32, u32),
         source_changed: bool,
     ) -> std::result::Result<(), HandlerError> {
-        if source_changed {
-            self.finalize_segment_now()?;
-        } else {
-            self.queue_segment_finalization()?;
+        if source_changed
+            && let Some(mut encoder) = self.encoder.take()
+            && let Some(segment) = encoder.finish_segment()?
+        {
+            self.finalize_segment_now(segment)?;
         }
         if source_changed {
             let mut buffer = lock(&self.flags.shared.buffer);
@@ -210,37 +264,36 @@ impl Cs2CaptureHandler {
             );
         }
         let prepared = if source_changed {
-            self.discard_prepared_encoder();
-            prepare_segment(&self.flags.shared, &self.flags.sequence, source_size)?
+            self.discard_prepared_audio_encoder();
+            prepare_audio_segment(&self.flags.shared, &self.flags.sequence, source_size)?
         } else {
-            match self.take_prepared_encoder(source_size)? {
+            match self.take_prepared_audio_encoder(source_size)? {
                 Some(prepared) => prepared,
-                None => prepare_segment(&self.flags.shared, &self.flags.sequence, source_size)?,
+                None => {
+                    prepare_audio_segment(&self.flags.shared, &self.flags.sequence, source_size)?
+                }
             }
         };
         let config = prepared.config;
         self.source_size = Some(source_size);
-        self.segment_started = Some(Instant::now());
         self.segment_started_at_ms = self.flags.shared.timeline_offset_ms.saturating_add(
             u64::try_from(self.flags.shared.clock_started.elapsed().as_millis())
                 .unwrap_or(u64::MAX),
         );
-        self.partial_path = Some(prepared.partial_path);
-        self.encoder = Some(prepared.encoder);
-        let _ = self.flags.encoder_request.try_send(source_size);
+        let initialized = Instant::now();
+        self.encoder = Some(DirectNvencEncoder::new(frame, config)?);
+        self.pacer = Some(FramePacer::new(config.frames_per_second));
+        self.audio_segment = Some(prepared);
+        let _ = self.flags.audio_encoder_request.try_send(source_size);
 
         let audio_error = lock(&self.flags.audio_error).clone();
         let mut status = lock(&self.flags.shared.status);
         status.state = RecordingState::Recording;
         status.message = Some(audio_error.map_or_else(
             || "Replay active · F8 saves the last 15 seconds".to_owned(),
-            |error| format!("Replay active · game audio unavailable: {error}"),
+            |error| format!("Replay active · audio unavailable: {error}"),
         ));
-        status.encoder = Some(if nvidia_driver_available() {
-            "NVIDIA H.264 via Windows Media Foundation".to_owned()
-        } else {
-            "Windows Media Foundation H.264 hardware acceleration".to_owned()
-        });
+        status.encoder = Some("NVIDIA NVENC DirectX 11".to_owned());
         status.capture_width = Some(config.width);
         status.capture_height = Some(config.height);
         status.capture_fps = Some(config.frames_per_second);
@@ -249,25 +302,27 @@ impl Cs2CaptureHandler {
             height = config.height,
             fps = config.frames_per_second,
             bitrate = config.bitrate,
-            audio = config.capture_game_audio,
-            init_ms = prepared.init_ms,
+            game_audio = config.capture_game_audio,
+            microphone = config.capture_microphone,
+            init_ms = initialized.elapsed().as_millis(),
+            audio_init_ms = self.audio_segment.as_ref().map_or(0, |audio| audio.init_ms),
             backend = %status.encoder.as_deref().unwrap_or("unknown"),
-            "H.264 hardware-accelerated segment encoder initialized"
+            "continuous direct NVENC encoder initialized"
         );
         Ok(())
     }
 
-    fn take_prepared_encoder(
+    fn take_prepared_audio_encoder(
         &self,
         source_size: (u32, u32),
-    ) -> std::result::Result<Option<PreparedSegment>, HandlerError> {
-        match lock(&self.flags.prepared_encoder).try_recv() {
+    ) -> std::result::Result<Option<PreparedAudioSegment>, HandlerError> {
+        match lock(&self.flags.prepared_audio_encoder).try_recv() {
             Ok(prepared) => {
                 let prepared = prepared.map_err(capture_error)?;
                 if prepared.source_size == source_size {
                     Ok(Some(prepared))
                 } else {
-                    discard_encoder_async(prepared);
+                    discard_audio_encoder_async(prepared);
                     Ok(None)
                 }
             }
@@ -275,39 +330,64 @@ impl Cs2CaptureHandler {
         }
     }
 
-    fn discard_prepared_encoder(&self) {
-        if let Ok(prepared) = lock(&self.flags.prepared_encoder).try_recv()
+    fn discard_prepared_audio_encoder(&self) {
+        if let Ok(prepared) = lock(&self.flags.prepared_audio_encoder).try_recv()
             && let Ok(prepared) = prepared
         {
-            discard_encoder_async(prepared);
+            discard_audio_encoder_async(prepared);
         }
     }
 
-    fn take_finalization_job(&mut self) -> Option<FinalizationJob> {
-        let encoder = self.encoder.take()?;
-        Some(FinalizationJob {
-            encoder,
-            partial_path: self.partial_path.take().expect("encoder path is paired"),
+    fn take_finalization_job(&mut self, video: VideoSegment) -> FinalizationJob {
+        let audio = self.audio_segment.take().expect("audio segment is paired");
+        let sequence = self.flags.sequence.fetch_add(1, Ordering::Relaxed);
+        let partial_path = self.flags.shared.replay_root.join(format!(
+            "segment-{:012}-{sequence:06}.mp4.partial",
+            self.flags.shared.clock_started.elapsed().as_millis()
+        ));
+        FinalizationJob {
+            video,
+            audio_encoder: audio.encoder,
+            audio_path: audio.path,
+            partial_path,
             started_at_ms: self.segment_started_at_ms,
             generation: self.generation,
             generation_clock: self.flags.generation.clone(),
-        })
+        }
     }
 
-    fn queue_segment_finalization(&mut self) -> std::result::Result<(), HandlerError> {
-        if let Some(job) = self.take_finalization_job() {
-            self.flags
-                .finalizer
-                .send(job)
-                .map_err(|_| "replay segment finalizer stopped")?;
-        }
+    fn queue_segment_finalization(
+        &mut self,
+        video: VideoSegment,
+    ) -> std::result::Result<(), HandlerError> {
+        let duration_ms = video.duration_ms;
+        let job = self.take_finalization_job(video);
+        self.flags
+            .finalizer
+            .send(job)
+            .map_err(|_| "replay segment finalizer stopped")?;
+        self.segment_started_at_ms = self.segment_started_at_ms.saturating_add(duration_ms);
         Ok(())
     }
 
-    fn finalize_segment_now(&mut self) -> std::result::Result<(), HandlerError> {
-        if let Some(job) = self.take_finalization_job() {
-            finalize_segment(&self.flags.shared, job)?;
-        }
+    fn finalize_segment_now(
+        &mut self,
+        video: VideoSegment,
+    ) -> std::result::Result<(), HandlerError> {
+        let job = self.take_finalization_job(video);
+        finalize_segment(&self.flags.shared, job)?;
+        Ok(())
+    }
+
+    fn prepare_next_audio(
+        &mut self,
+        source_size: (u32, u32),
+    ) -> std::result::Result<(), HandlerError> {
+        self.audio_segment = Some(match self.take_prepared_audio_encoder(source_size)? {
+            Some(prepared) => prepared,
+            None => prepare_audio_segment(&self.flags.shared, &self.flags.sequence, source_size)?,
+        });
+        let _ = self.flags.audio_encoder_request.try_send(source_size);
         Ok(())
     }
 }
@@ -317,8 +397,19 @@ fn finalize_segment(
     job: FinalizationJob,
 ) -> std::result::Result<(), HandlerError> {
     let started = Instant::now();
-    job.encoder.finish()?;
-    let media = validate_finalized_segment(&job.partial_path)?;
+    if let Some(encoder) = job.audio_encoder {
+        encoder.finish()?;
+    }
+    let media = mux_video_with_audio(
+        &job.video.bytes,
+        job.audio_path.as_deref(),
+        &job.partial_path,
+    )?;
+    if let Some(audio_path) = job.audio_path
+        && let Err(error) = std::fs::remove_file(&audio_path)
+    {
+        tracing::warn!(%error, path = %audio_path.display(), "could not remove temporary AAC segment");
+    }
     let final_path = job.partial_path.with_extension("");
     std::fs::rename(&job.partial_path, &final_path)?;
     let size_bytes = std::fs::metadata(&final_path)?.len();
@@ -344,6 +435,7 @@ fn finalize_segment(
         buffer_bytes = buffer.total_bytes(),
         buffered_seconds = status.buffered_seconds,
         finalize_ms = started.elapsed().as_millis(),
+        encoded_frames = job.video.frame_count,
         "finalized replay segment"
     );
     drop(status);
@@ -353,50 +445,55 @@ fn finalize_segment(
     Ok(())
 }
 
-fn prepare_segment(
+fn prepare_audio_segment(
     shared: &SharedRecorder,
     sequence: &AtomicU64,
     source_size: (u32, u32),
-) -> std::result::Result<PreparedSegment, HandlerError> {
+) -> std::result::Result<PreparedAudioSegment, HandlerError> {
     let config = encoder_config(&read(&shared.settings), source_size.0, source_size.1);
+    if !config.capture_game_audio && !config.capture_microphone {
+        return Ok(PreparedAudioSegment {
+            encoder: None,
+            path: None,
+            source_size,
+            config,
+            init_ms: 0,
+        });
+    }
     let sequence = sequence.fetch_add(1, Ordering::Relaxed);
-    let partial_path = shared.replay_root.join(format!(
-        "segment-{:012}-{sequence:06}.mp4.partial",
-        shared.clock_started.elapsed().as_millis()
-    ));
+    let path = shared
+        .replay_root
+        .join(format!("audio-{sequence:06}.m4a.partial"));
     let initialized = Instant::now();
     let encoder = VideoEncoder::new(
-        VideoSettingsBuilder::new(config.width, config.height)
-            .sub_type(VideoSettingsSubType::H264)
-            .bitrate(config.bitrate)
-            .frame_rate(u32::from(config.frames_per_second)),
-        AudioSettingsBuilder::new().disabled(!config.capture_game_audio),
+        VideoSettingsBuilder::new(config.width, config.height).disabled(true),
+        AudioSettingsBuilder::new(),
         ContainerSettingsBuilder::new(),
-        &partial_path,
+        &path,
     )?;
-    Ok(PreparedSegment {
-        encoder,
-        partial_path,
+    Ok(PreparedAudioSegment {
+        encoder: Some(encoder),
+        path: Some(path),
         source_size,
         config,
         init_ms: initialized.elapsed().as_millis(),
     })
 }
 
-fn spawn_encoder_factory(
+fn spawn_audio_encoder_factory(
     shared: &Arc<SharedRecorder>,
     sequence: &Arc<AtomicU64>,
-) -> std::io::Result<EncoderFactory> {
+) -> std::io::Result<AudioEncoderFactory> {
     let (request_sender, requests) = sync_channel(1);
     let (prepared_sender, prepared_receiver) = sync_channel(1);
     let shared = shared.clone();
     let sequence = sequence.clone();
     let worker = thread::Builder::new()
-        .name("openclip-encoder-prewarmer".to_owned())
+        .name("openclip-aac-prewarmer".to_owned())
         .spawn(move || {
             let _ = initialize_mta();
             while let Ok(source_size) = requests.recv() {
-                let prepared = prepare_segment(&shared, &sequence, source_size)
+                let prepared = prepare_audio_segment(&shared, &sequence, source_size)
                     .map_err(|error| error.to_string());
                 if prepared_sender.send(prepared).is_err() {
                     break;
@@ -406,13 +503,15 @@ fn spawn_encoder_factory(
     Ok((request_sender, prepared_receiver, worker))
 }
 
-fn discard_encoder_async(prepared: PreparedSegment) {
+fn discard_audio_encoder_async(prepared: PreparedAudioSegment) {
     let result = thread::Builder::new()
-        .name("openclip-unused-encoder-cleanup".to_owned())
+        .name("openclip-unused-aac-cleanup".to_owned())
         .spawn(move || {
-            let path = prepared.partial_path.clone();
+            let path = prepared.path.clone();
             drop(prepared);
-            let _ = std::fs::remove_file(path);
+            if let Some(path) = path {
+                let _ = std::fs::remove_file(path);
+            }
         });
     if let Err(error) = result {
         tracing::warn!(%error, "could not start unused encoder cleanup");
@@ -487,21 +586,24 @@ fn run_capture_session(
     target: Window,
 ) -> std::result::Result<(), HandlerError> {
     let process_id = target.process_id()?;
+    let settings_generation = shared.settings_generation.load(Ordering::Acquire);
     let audio_stop = Arc::new(AtomicBool::new(false));
     let (audio_sender, audio_receiver) = sync_channel(AUDIO_CHANNEL_CAPACITY);
     let audio_error = Arc::new(Mutex::new(None));
-    if read(&shared.settings).capture_game_audio {
-        spawn_audio_capture(
-            process_id,
-            audio_sender,
-            audio_stop.clone(),
-            audio_error.clone(),
-        );
-    }
-    let fps = read(&shared.settings).frames_per_second.clamp(1, 60);
+    let recording_settings = read(&shared.settings).clone();
+    spawn_audio_sources(
+        process_id,
+        recording_settings.capture_game_audio,
+        recording_settings.capture_microphone,
+        recording_settings.microphone_device_id.clone(),
+        audio_sender,
+        audio_stop.clone(),
+        audio_error.clone(),
+    );
+    let fps = recording_settings.frames_per_second.clamp(1, 60);
     let (finalizer, finalizer_thread) = spawn_segment_finalizer(shared)?;
-    let (encoder_request, prepared_encoder, encoder_factory) =
-        spawn_encoder_factory(shared, sequence)?;
+    let (audio_encoder_request, prepared_audio_encoder, audio_encoder_factory) =
+        spawn_audio_encoder_factory(shared, sequence)?;
     let flags = HandlerFlags {
         shared: shared.clone(),
         sequence: sequence.clone(),
@@ -509,15 +611,17 @@ fn run_capture_session(
         audio_error,
         finalizer: finalizer.clone(),
         generation: Arc::new(AtomicU64::new(0)),
-        encoder_request,
-        prepared_encoder: Arc::new(Mutex::new(prepared_encoder)),
+        audio_encoder_request,
+        prepared_audio_encoder: Arc::new(Mutex::new(prepared_audio_encoder)),
     };
     let settings = CaptureSettings::new(
         target,
         CursorCaptureSettings::WithoutCursor,
         DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Exclude,
-        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / f64::from(fps))),
+        // WGC is sampled above the encoded rate; the deterministic pacer assigns arrivals
+        // to exact output slots and direct NVENC keeps the callback free of MF video work.
+        MinimumUpdateIntervalSettings::Custom(capture_interval_with_headroom(fps)),
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,
@@ -525,7 +629,11 @@ fn run_capture_session(
     let capture_result = match Cs2CaptureHandler::start_free_threaded(settings) {
         Ok(control) => {
             tracing::info!(process_id, "CS2 capture target detected");
-            while !stop.load(Ordering::Acquire) && !control.is_finished() && cs2_window_exists() {
+            while !stop.load(Ordering::Acquire)
+                && !control.is_finished()
+                && cs2_window_exists()
+                && shared.settings_generation.load(Ordering::Acquire) == settings_generation
+            {
                 thread::sleep(Duration::from_millis(500));
             }
             control.stop().map_err(HandlerError::from)
@@ -537,10 +645,20 @@ fn run_capture_session(
     if finalizer_thread.join().is_err() {
         return Err("replay segment finalizer panicked".into());
     }
-    if encoder_factory.join().is_err() {
-        return Err("encoder prewarmer panicked".into());
+    if audio_encoder_factory.join().is_err() {
+        return Err("AAC prewarmer panicked".into());
+    }
+    if shared.settings_generation.load(Ordering::Acquire) != settings_generation {
+        let removed = lock(&shared.buffer).clear();
+        remove_segments(shared, removed);
+        tracing::info!("capture settings changed; replay window reset");
     }
     capture_result
+}
+
+fn capture_interval_with_headroom(encoded_fps: u16) -> Duration {
+    let requested_fps = f64::from(encoded_fps).mul_add(0.25, f64::from(encoded_fps));
+    Duration::from_secs_f64(1.0 / requested_fps)
 }
 
 fn hardware_ready(shared: &SharedRecorder) -> bool {
@@ -577,7 +695,37 @@ fn cs2_window_exists() -> bool {
     find_cs2_window().is_ok_and(|target| target.is_some())
 }
 
-fn spawn_audio_capture(
+fn spawn_audio_sources(
+    process_id: u32,
+    capture_game: bool,
+    capture_microphone: bool,
+    microphone_device_id: Option<String>,
+    sender: SyncSender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+    error_slot: Arc<Mutex<Option<String>>>,
+) {
+    match (capture_game, capture_microphone) {
+        (true, true) => {
+            let (game_sender, game_receiver) = sync_channel(AUDIO_CHANNEL_CAPACITY / 2);
+            let (mic_sender, mic_receiver) = sync_channel(AUDIO_CHANNEL_CAPACITY / 2);
+            spawn_game_audio_capture(process_id, game_sender, stop.clone(), error_slot.clone());
+            spawn_microphone_capture(microphone_device_id, mic_sender, stop.clone(), error_slot);
+            if let Err(error) = thread::Builder::new()
+                .name("openclip-audio-mixer".to_owned())
+                .spawn(move || mix_audio_sources(&game_receiver, &mic_receiver, &sender, &stop))
+            {
+                tracing::warn!(%error, "could not start audio mixer thread");
+            }
+        }
+        (true, false) => spawn_game_audio_capture(process_id, sender, stop, error_slot),
+        (false, true) => {
+            spawn_microphone_capture(microphone_device_id, sender, stop, error_slot);
+        }
+        (false, false) => {}
+    }
+}
+
+fn spawn_game_audio_capture(
     process_id: u32,
     sender: SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
@@ -586,7 +734,7 @@ fn spawn_audio_capture(
     let result = thread::Builder::new()
         .name("openclip-cs2-audio".to_owned())
         .spawn(move || {
-            if let Err(error) = capture_audio(process_id, &sender, &stop) {
+            if let Err(error) = capture_game_audio(process_id, &sender, &stop) {
                 tracing::warn!(%error, "CS2 process-loopback audio stopped");
                 *lock(&error_slot) = Some(error.to_string());
             }
@@ -596,7 +744,26 @@ fn spawn_audio_capture(
     }
 }
 
-fn capture_audio(
+fn spawn_microphone_capture(
+    device_id: Option<String>,
+    sender: SyncSender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+    error_slot: Arc<Mutex<Option<String>>>,
+) {
+    let result = thread::Builder::new()
+        .name("openclip-microphone-audio".to_owned())
+        .spawn(move || {
+            if let Err(error) = capture_microphone_audio(device_id.as_deref(), &sender, &stop) {
+                tracing::warn!(%error, "microphone capture stopped");
+                *lock(&error_slot) = Some(format!("microphone: {error}"));
+            }
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "could not start microphone thread");
+    }
+}
+
+fn capture_game_audio(
     process_id: u32,
     sender: &SyncSender<Vec<u8>>,
     stop: &AtomicBool,
@@ -633,6 +800,121 @@ fn capture_audio(
     }
     client.stop_stream()?;
     Ok(())
+}
+
+fn capture_microphone_audio(
+    device_id: Option<&str>,
+    sender: &SyncSender<Vec<u8>>,
+    stop: &AtomicBool,
+) -> std::result::Result<(), HandlerError> {
+    let _ = initialize_mta();
+    let enumerator = wasapi::DeviceEnumerator::new()?;
+    let device = match device_id {
+        Some(id) => enumerator.get_device(id)?,
+        None => enumerator.get_default_device(&Direction::Capture)?,
+    };
+    let mut client = device.get_iaudioclient()?;
+    let format = WaveFormat::new(16, 16, &SampleType::Int, 48_000, 2, None);
+    let block_align = usize::try_from(format.get_blockalign())?;
+    client.initialize_client(
+        &format,
+        &Direction::Capture,
+        &StreamMode::EventsShared {
+            autoconvert: true,
+            buffer_duration_hns: 0,
+        },
+    )?;
+    let event = client.set_get_eventhandle()?;
+    let capture = client.get_audiocaptureclient()?;
+    let mut queue = VecDeque::new();
+    client.start_stream()?;
+    while !stop.load(Ordering::Acquire) {
+        capture.read_from_device_to_deque(&mut queue)?;
+        let chunk_bytes = block_align * AUDIO_CHUNK_FRAMES;
+        while queue.len() >= chunk_bytes {
+            let bytes = queue.drain(..chunk_bytes).collect();
+            if sender.try_send(bytes).is_err() {
+                break;
+            }
+        }
+        let _ = event.wait_for_event(250);
+    }
+    client.stop_stream()?;
+    Ok(())
+}
+
+fn mix_audio_sources(
+    game: &Receiver<Vec<u8>>,
+    microphone: &Receiver<Vec<u8>>,
+    output: &SyncSender<Vec<u8>>,
+    stop: &AtomicBool,
+) {
+    let mut game_queue = VecDeque::new();
+    let mut microphone_queue = VecDeque::new();
+    let mut game_disconnected = false;
+    let mut microphone_disconnected = false;
+    while !stop.load(Ordering::Acquire) {
+        game_disconnected |= drain_audio_receiver(game, &mut game_queue);
+        microphone_disconnected |= drain_audio_receiver(microphone, &mut microphone_queue);
+        while let Some(chunk) = next_mixed_audio_chunk(
+            &mut game_queue,
+            &mut microphone_queue,
+            game_disconnected,
+            microphone_disconnected,
+        ) {
+            // The video callback must never wait for audio. A full downstream queue drops the
+            // oldest ready chunk here instead of allowing an unbounded mixer backlog.
+            let _ = output.try_send(chunk);
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn drain_audio_receiver(receiver: &Receiver<Vec<u8>>, queue: &mut VecDeque<Vec<u8>>) -> bool {
+    loop {
+        match receiver.try_recv() {
+            Ok(chunk) => queue.push_back(chunk),
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+fn next_mixed_audio_chunk(
+    game: &mut VecDeque<Vec<u8>>,
+    microphone: &mut VecDeque<Vec<u8>>,
+    game_disconnected: bool,
+    microphone_disconnected: bool,
+) -> Option<Vec<u8>> {
+    if !game.is_empty() && !microphone.is_empty() {
+        return Some(mix_pcm_s16(
+            &game.pop_front().expect("queue is non-empty"),
+            &microphone.pop_front().expect("queue is non-empty"),
+        ));
+    }
+    if !game.is_empty() && (microphone_disconnected || game.len() > AUDIO_MIX_JITTER_CHUNKS) {
+        return game.pop_front();
+    }
+    if !microphone.is_empty() && (game_disconnected || microphone.len() > AUDIO_MIX_JITTER_CHUNKS) {
+        return microphone.pop_front();
+    }
+    None
+}
+
+fn mix_pcm_s16(left: &[u8], right: &[u8]) -> Vec<u8> {
+    left.chunks_exact(2)
+        .zip(right.chunks_exact(2))
+        .flat_map(|(left, right)| {
+            let left = i16::from_le_bytes([left[0], left[1]]);
+            let right = i16::from_le_bytes([right[0], right[1]]);
+            let mixed = i32::from(left)
+                .saturating_add(i32::from(right))
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+            i16::try_from(mixed)
+                .unwrap_or(if mixed < 0 { i16::MIN } else { i16::MAX })
+                .to_le_bytes()
+        })
+        .collect()
 }
 
 fn nvidia_driver_available() -> bool {
@@ -676,4 +958,48 @@ pub(crate) fn list_microphone_devices() -> Result<Vec<AudioDevice>> {
     }
     devices.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(devices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pcm_mixer_sums_and_saturates_signed_samples() {
+        let left = [1_000_i16, 30_000, -30_000]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let right = [2_000_i16, 10_000, -10_000]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mixed = mix_pcm_s16(&left, &right)
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+            .collect::<Vec<_>>();
+        assert_eq!(mixed, [3_000, i16::MAX, i16::MIN]);
+    }
+
+    #[test]
+    fn audio_mixer_bounds_clock_drift_with_a_small_jitter_window() {
+        let mut game = VecDeque::from([vec![1], vec![2], vec![3]]);
+        let mut microphone = VecDeque::new();
+        assert_eq!(
+            next_mixed_audio_chunk(&mut game, &mut microphone, false, false),
+            Some(vec![1])
+        );
+        assert_eq!(game.len(), AUDIO_MIX_JITTER_CHUNKS);
+        assert!(next_mixed_audio_chunk(&mut game, &mut microphone, false, false).is_none());
+    }
+
+    #[test]
+    fn audio_mixer_keeps_the_surviving_source_after_endpoint_loss() {
+        let mut game = VecDeque::from([vec![1, 0, 2, 0]]);
+        let mut microphone = VecDeque::new();
+        assert_eq!(
+            next_mixed_audio_chunk(&mut game, &mut microphone, false, true),
+            Some(vec![1, 0, 2, 0])
+        );
+    }
 }
