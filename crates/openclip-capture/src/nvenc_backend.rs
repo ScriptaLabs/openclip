@@ -54,7 +54,6 @@ fn nvenc_result(result: nvenc::sys::result::NVencResult) -> Result<(), BackendEr
 /// A single independently playable H.264 segment produced by one continuous NVENC session.
 pub(crate) struct VideoSegment {
     pub bytes: Vec<u8>,
-    pub duration_ms: u64,
     pub frame_count: u32,
 }
 
@@ -382,10 +381,8 @@ impl DirectNvencEncoder {
             )?;
         }
         let frame_count = u32::try_from(frames.len()).unwrap_or(u32::MAX);
-        let duration_ms = u64::from(frame_count) * 1_000 / u64::from(self.config.frames_per_second);
         Ok(VideoSegment {
             bytes: writer.finalize()?,
-            duration_ms,
             frame_count,
         })
     }

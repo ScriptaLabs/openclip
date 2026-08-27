@@ -100,6 +100,7 @@ struct FinalizationJob {
     audio_path: Option<PathBuf>,
     partial_path: PathBuf,
     started_at_ms: u64,
+    ended_at_ms: u64,
     generation: u64,
     generation_clock: Arc<AtomicU64>,
 }
@@ -354,6 +355,10 @@ impl Cs2CaptureHandler {
     fn take_finalization_job(&mut self, video: VideoSegment) -> FinalizationJob {
         let audio = self.audio_segment.take().expect("audio segment is paired");
         let sequence = self.flags.sequence.fetch_add(1, Ordering::Relaxed);
+        let ended_at_ms = self.flags.shared.timeline_offset_ms.saturating_add(
+            u64::try_from(self.flags.shared.clock_started.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
+        );
         let partial_path = self.flags.shared.replay_root.join(format!(
             "segment-{:012}-{sequence:06}.mp4.partial",
             self.flags.shared.clock_started.elapsed().as_millis()
@@ -364,6 +369,7 @@ impl Cs2CaptureHandler {
             audio_path: audio.path,
             partial_path,
             started_at_ms: self.segment_started_at_ms,
+            ended_at_ms: ended_at_ms.max(self.segment_started_at_ms),
             generation: self.generation,
             generation_clock: self.flags.generation.clone(),
         }
@@ -373,13 +379,15 @@ impl Cs2CaptureHandler {
         &mut self,
         video: VideoSegment,
     ) -> std::result::Result<(), HandlerError> {
-        let duration_ms = video.duration_ms;
         let job = self.take_finalization_job(video);
+        // Highlight windows use the recorder's monotonic wall clock. Advancing this index by
+        // encoded frame duration makes it drift whenever WGC delivers fewer frames than the CFR
+        // target, eventually placing automatic moments ahead of the replay buffer.
+        self.segment_started_at_ms = job.ended_at_ms;
         self.flags
             .finalizer
             .send(job)
             .map_err(|_| "replay segment finalizer stopped")?;
-        self.segment_started_at_ms = self.segment_started_at_ms.saturating_add(duration_ms);
         Ok(())
     }
 
@@ -422,7 +430,7 @@ fn finalize_segment(
     if let Some(encoder) = job.audio_encoder {
         encoder.finish()?;
     }
-    let media = mux_video_with_audio(
+    let _media = mux_video_with_audio(
         &job.video.bytes,
         job.audio_path.as_deref(),
         &job.partial_path,
@@ -438,7 +446,7 @@ fn finalize_segment(
     let segment = ReplaySegment {
         path: final_path,
         started_at_ms: job.started_at_ms,
-        ended_at_ms: job.started_at_ms.saturating_add(media.duration_ms),
+        ended_at_ms: job.ended_at_ms,
         size_bytes,
         begins_with_keyframe: true,
     };
