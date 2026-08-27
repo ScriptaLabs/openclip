@@ -110,7 +110,11 @@ function App() {
         status={status}
         recordingStatus={recordingStatus}
       />
-      <main className="main-content">{content}</main>
+      <main className="main-content">
+        <div className="page-transition" key={selectedMatch ? `match-${selectedMatch.id}` : page}>
+          {content}
+        </div>
+      </main>
       {clipNotice && <div className="clip-notice" role="status">{clipNotice}</div>}
     </div>
   );

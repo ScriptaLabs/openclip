@@ -12,21 +12,28 @@ interface GameDetailPageProps {
 
 function ClipThumbnail({ matchId, moment }: { matchId: string; moment: Moment }) {
   const [source, setSource] = useState<string | null>(null);
+  const [loading, setLoading] = useState(Boolean(moment.clipPath));
   useEffect(() => {
+    setSource(null);
+    setLoading(Boolean(moment.clipPath));
     if (!moment.clipPath) return;
     let active = true;
     let objectUrl: string | null = null;
     void getMomentThumbnail(matchId, moment.id).then((bytes) => {
       if (!active || bytes.length === 0) return;
-      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/bmp" }));
+      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }));
       setSource(objectUrl);
-    }).catch((error) => console.warn("Could not load clip thumbnail", error));
+    }).catch((error) => console.warn("Could not load clip thumbnail", error)).finally(() => {
+      if (active) setLoading(false);
+    });
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [matchId, moment.clipPath, moment.id]);
-  return source ? <img alt="" className="moment-thumbnail-image" src={source} /> : <div className="thumbnail-grid" />;
+  return source
+    ? <img alt="" className="moment-thumbnail-image" onError={() => setSource(null)} src={source} />
+    : <div className={`thumbnail-grid ${loading ? "is-loading" : ""}`} />;
 }
 
 function momentSummary(moment: Moment): string {

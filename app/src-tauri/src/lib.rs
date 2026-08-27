@@ -7,10 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use openclip_capture::{
-    AudioDevice, RecorderService, generate_clip_thumbnail, list_microphone_devices,
-    thumbnail_path_for_clip,
-};
+use openclip_capture::{AudioDevice, RecorderService, list_microphone_devices};
 use openclip_core::{
     Clip, GameEventType, GameStateUpdate, Match, MatchId, MatchRepository, Moment, RecordingStatus,
     Settings,
@@ -272,6 +269,7 @@ fn open_moment_clip(
 fn get_moment_thumbnail(
     match_id: MatchId,
     moment_id: openclip_core::MomentId,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<u8>, String> {
     let game_match = state
@@ -290,11 +288,11 @@ fn get_moment_thumbnail(
     if !clip.is_file() {
         return Err("the captured video file is no longer available".to_owned());
     }
-    let mut thumbnail = thumbnail_path_for_clip(clip);
+    let thumbnail = jpeg_thumbnail_path(clip);
     if !thumbnail.is_file() {
-        thumbnail = generate_clip_thumbnail(clip).map_err(|error| {
+        generate_jpeg_thumbnail(&app, clip, &thumbnail).map_err(|error| {
             tracing::warn!(%error, %moment_id, path = %clip.display(), "could not generate requested clip thumbnail");
-            error.to_string()
+            error
         })?;
     }
     let bytes = std::fs::read(&thumbnail).map_err(|error| error.to_string())?;
@@ -302,6 +300,59 @@ fn get_moment_thumbnail(
         return Err("the generated thumbnail exceeded the safety limit".to_owned());
     }
     Ok(bytes)
+}
+
+fn jpeg_thumbnail_path(clip: &Path) -> PathBuf {
+    let mut name = clip.file_stem().unwrap_or_default().to_os_string();
+    name.push(".thumbnail.jpg");
+    clip.with_file_name(name)
+}
+
+fn generate_jpeg_thumbnail(
+    app: &tauri::AppHandle,
+    clip: &Path,
+    thumbnail: &Path,
+) -> Result<(), String> {
+    let partial = thumbnail.with_extension("jpg.partial");
+    let ffmpeg = bundled_ffmpeg_path(app);
+    let mut command = Command::new(&ffmpeg);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", "1"])
+        .arg("-i")
+        .arg(clip)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=480:-2",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-f",
+            "image2",
+        ])
+        .arg(&partial)
+        .output()
+        .map_err(|error| {
+            format!(
+                "could not start bundled FFmpeg at {}: {error}",
+                ffmpeg.display()
+            )
+        })?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!(
+            "thumbnail generation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    std::fs::rename(&partial, thumbnail).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -739,5 +790,13 @@ mod tests {
     fn watermark_canvas_scales_to_one_quarter_of_the_clip() {
         assert_eq!(watermark_canvas_width(1_920), 480);
         assert_eq!(watermark_canvas_width(1_280), 320);
+    }
+
+    #[test]
+    fn jpeg_thumbnail_is_adjacent_to_its_clip() {
+        assert_eq!(
+            jpeg_thumbnail_path(Path::new(r"C:\Clips\ace.mp4")),
+            PathBuf::from(r"C:\Clips\ace.thumbnail.jpg")
+        );
     }
 }

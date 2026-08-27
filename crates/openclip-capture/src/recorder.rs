@@ -154,14 +154,9 @@ impl RecorderService {
     ) -> Result<Clip> {
         let _save = lock(&self.shared.save_lock);
         let previous = self.status();
-        if !matches!(
-            previous.state,
-            RecordingState::Recording | RecordingState::SavingReplay
-        ) {
-            return Err(OpenClipError::Unavailable(
-                "capture was unavailable when the moment completed".to_owned(),
-            ));
-        }
+        // Automatic moments can finish just after CS2 closes or its capture target is recreated.
+        // The independently finalized segments are still valid in that state, so always try the
+        // retained buffer before declaring the moment unavailable.
         set_status(
             &self.shared,
             RecordingState::SavingReplay,
@@ -254,10 +249,6 @@ impl RecorderService {
         let media = remux_segments(&paths, &path);
         self.unpin_segments(&paths);
         let media = media?;
-        #[cfg(windows)]
-        if let Err(error) = crate::generate_clip_thumbnail(&path) {
-            tracing::warn!(%error, path = %path.display(), "could not generate clip thumbnail");
-        }
         tracing::info!(
             path = %path.display(),
             duration_ms = media.duration_ms,
@@ -495,10 +486,9 @@ mod tests {
     }
 
     #[test]
-    fn ranged_save_waits_for_pending_segment_finalization() {
+    fn ranged_save_salvages_segments_after_capture_leaves_recording_state() {
         let directory = tempfile::tempdir().expect("temp directory");
         let recorder = RecorderService::new(directory.path(), Settings::default()).unwrap();
-        set_status(&recorder.shared, RecordingState::Recording, "testing");
         let saving = recorder.clone();
         let match_id = MatchId::new();
         let moment_id = MomentId::new();
