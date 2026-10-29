@@ -54,3 +54,13 @@ Invoke-WebRequest -Method Post -ContentType "application/json" `
 Structured native logs report listener startup, CS2 detection, lifecycle transitions, malformed
 payloads, and persistence failures. The Settings card distinguishes a missing Steam/CS2 install from
 an install that simply needs OpenClip's config.
+
+## Game modes
+
+`map.mode` is mapped to the generic `MatchMode`: `competitive`, `premier`, `casual`, `deathmatch`
+and `rush`. Any other value is stored as `unknown` and logged once as "unrecognized game mode" so
+it can be added to `parse_mode`; the match is still recorded.
+
+Rush (3v3 against bots, about 40-second rounds, 15 rounds, no halftime, friendly fire on) is the
+game's own `rush` mode in `gamemodes.txt`. Its map name has no engine prefix (`rush_001`); map names
+are normalized to the engine name, and a trailing revision such as `_001` is hidden in the UI.

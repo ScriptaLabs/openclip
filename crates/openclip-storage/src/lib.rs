@@ -15,6 +15,7 @@ use uuid::Uuid;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CAPTURED_CLIPS_MIGRATION: &str = include_str!("../migrations/0002_captured_clips.sql");
 const CLIP_ORIGINS_MIGRATION: &str = include_str!("../migrations/0003_clip_origins.sql");
+const RUSH_MODE_MIGRATION: &str = include_str!("../migrations/0004_rush_mode.sql");
 
 pub struct SqliteRepository {
     connection: Connection,
@@ -48,7 +49,7 @@ impl SqliteRepository {
     fn migrate(&self) -> openclip_core::Result<()> {
         self.connection
             .execute_batch(&format!(
-                "{INITIAL_MIGRATION}\n{CAPTURED_CLIPS_MIGRATION}\n{CLIP_ORIGINS_MIGRATION}"
+                "{INITIAL_MIGRATION}\n{CAPTURED_CLIPS_MIGRATION}\n{CLIP_ORIGINS_MIGRATION}\n{RUSH_MODE_MIGRATION}"
             ))
             .map_err(storage_error)
     }
@@ -592,6 +593,45 @@ mod tests {
         Utc.timestamp_opt(seconds, 0)
             .single()
             .expect("valid test time")
+    }
+
+    #[test]
+    fn earlier_rush_matches_stored_as_unknown_are_relabelled() {
+        let mut repository = SqliteRepository::in_memory().expect("database opens");
+        let session = GameSession {
+            id: GameSessionId::new(),
+            game: Game::CounterStrike2,
+            started_at: timestamp(1_000),
+            ended_at: None,
+        };
+        repository.save_session(&session).expect("session saves");
+        let saved_match = |map: &str| Match {
+            id: MatchId::new(),
+            session_id: session.id,
+            map: Some(map.to_owned()),
+            mode: MatchMode::Unknown,
+            started_at: timestamp(1_000),
+            ended_at: None,
+            score_team_a: None,
+            score_team_b: None,
+            rounds: Vec::new(),
+            moments: Vec::new(),
+        };
+        let rush = saved_match("rush_001");
+        let mirage = saved_match("de_mirage");
+        repository.save_match(&rush).expect("rush match saves");
+        repository.save_match(&mirage).expect("mirage match saves");
+
+        // The migration runs on every start, so reopening the store applies it.
+        repository.migrate().expect("migration applies again");
+
+        let mode_of = |id| repository.get_match(id).unwrap().unwrap().mode;
+        assert_eq!(mode_of(rush.id), MatchMode::Rush);
+        assert_eq!(
+            mode_of(mirage.id),
+            MatchMode::Unknown,
+            "other maps are left alone"
+        );
     }
 
     #[test]

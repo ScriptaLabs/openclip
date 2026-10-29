@@ -172,13 +172,17 @@ impl Cs2Adapter {
             return;
         };
         let map = payload.map.as_ref();
+        let raw_mode = map.and_then(|map| map.mode.as_deref());
+        let mode = raw_mode.map_or(MatchMode::Unknown, parse_mode);
+        if mode == MatchMode::Unknown {
+            // A new or unlisted game mode still records; this line says what to add to parse_mode.
+            warn!(mode = raw_mode, "unrecognized game mode");
+        }
         let game_match = Match {
             id: MatchId::new(),
             session_id,
             map: payload.normalized_map_name(),
-            mode: map
-                .and_then(|map| map.mode.as_deref())
-                .map_or(MatchMode::Unknown, parse_mode),
+            mode,
             started_at: timestamp,
             ended_at: None,
             score_team_a: map.and_then(ct_score),
@@ -539,6 +543,7 @@ fn parse_mode(mode: &str) -> MatchMode {
         "premier" => MatchMode::Premier,
         "casual" => MatchMode::Casual,
         "deathmatch" => MatchMode::Deathmatch,
+        "rush" => MatchMode::Rush,
         _ => MatchMode::Unknown,
     }
 }

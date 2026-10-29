@@ -133,3 +133,58 @@ fn a_new_match_starts_cleanly_after_the_game_was_closed() {
     let first_kill = feed(&mut adapter, &payload(2_010, "de_mirage", 0, 1));
     assert_eq!(count(&first_kill, GameEventType::Kill), 1);
 }
+
+fn rush(timestamp: i64, round: u16, round_phase: &str, kills: u16) -> Value {
+    let mut value = payload(timestamp, "rush_001", round, kills);
+    value["map"]["mode"] = json!("rush");
+    value["round"]["phase"] = json!(round_phase);
+    value
+}
+
+#[test]
+fn rush_matches_are_recognized_with_a_plain_map_name() {
+    let mut adapter = Cs2Adapter::default();
+    let started = feed(&mut adapter, &rush(100, 0, "live", 0));
+    assert_eq!(count(&started, GameEventType::MatchStart), 1);
+    let game_match = &started.matches[0];
+    assert_eq!(game_match.mode, openclip_core::MatchMode::Rush);
+    assert_eq!(game_match.map.as_deref(), Some("rush_001"));
+}
+
+#[test]
+fn rush_rounds_forty_seconds_apart_keep_their_kills_in_their_own_round() {
+    let mut adapter = Cs2Adapter::default();
+    feed(&mut adapter, &rush(100, 0, "live", 0));
+    let first_kill = feed(&mut adapter, &rush(120, 0, "live", 1));
+    let mut over = rush(140, 0, "over", 2);
+    over["round"]["win_team"] = json!("CT");
+    let closing = feed(&mut adapter, &over);
+    feed(&mut adapter, &rush(151, 1, "freezetime", 2));
+    let next_round = feed(&mut adapter, &rush(160, 1, "live", 3));
+
+    let round_of = |update: &GameStateUpdate| {
+        update
+            .events
+            .iter()
+            .find(|event| event.event_type == GameEventType::Kill)
+            .and_then(|event| event.round_id)
+    };
+    let first = round_of(&first_kill).expect("first kill has a round");
+    assert_eq!(
+        round_of(&closing),
+        Some(first),
+        "the round-ending kill stays in its round"
+    );
+    let second = round_of(&next_round).expect("kill in the next round has a round");
+    assert_ne!(first, second);
+}
+
+#[test]
+fn an_unlisted_mode_still_records_the_match() {
+    let mut adapter = Cs2Adapter::default();
+    let mut value = payload(100, "de_mirage", 0, 0);
+    value["map"]["mode"] = json!("some_future_mode");
+    let started = feed(&mut adapter, &value);
+    assert_eq!(count(&started, GameEventType::MatchStart), 1);
+    assert_eq!(started.matches[0].mode, openclip_core::MatchMode::Unknown);
+}

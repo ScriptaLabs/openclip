@@ -61,6 +61,8 @@ pub enum MatchMode {
     Premier,
     Casual,
     Deathmatch,
+    /// Short 3v3 rounds against bots (`rush` in the game's mode list).
+    Rush,
     Unknown,
 }
 

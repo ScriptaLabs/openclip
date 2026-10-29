@@ -1,5 +1,5 @@
 export type Game = "counter_strike2";
-export type MatchMode = "competitive" | "premier" | "casual" | "deathmatch" | "unknown";
+export type MatchMode = "competitive" | "premier" | "casual" | "deathmatch" | "rush" | "unknown";
 export type GameEventType =
   | "match_start"
   | "match_end"

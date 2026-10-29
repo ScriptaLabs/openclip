@@ -16,6 +16,7 @@ import office from "../../assets/map_splash/office.jpg";
 import overpass from "../../assets/map_splash/overpass.jpg";
 import palais from "../../assets/map_splash/palais.jpg";
 import poolDay from "../../assets/map_splash/pool_day.jpg";
+import rush001 from "../../assets/map_splash/rush_001.jpg";
 import shoots from "../../assets/map_splash/shoots.jpg";
 import train from "../../assets/map_splash/train.jpg";
 import vertigo from "../../assets/map_splash/vertigo.jpg";
@@ -23,7 +24,7 @@ import whistle from "../../assets/map_splash/whistle.jpg";
 
 const artwork: Record<string, string> = {
   agency, ancient, anubis, baggage, basalt, dust2, edin, grail, inferno, italy, jura,
-  mirage, nuke, office, overpass, palais, pool_day: poolDay, shoots, train, vertigo, whistle,
+  mirage, nuke, office, overpass, palais, pool_day: poolDay, rush_001: rush001, shoots, train, vertigo, whistle,
 };
 
 export function artworkForMap(map: string | null): string | null {

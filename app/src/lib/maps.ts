@@ -18,7 +18,11 @@ export function mapKey(raw: string | null | undefined): string | null {
 export function mapLabel(raw: string | null | undefined): string {
   const key = mapKey(raw);
   if (!key) return "Unknown map";
-  const name = key.replace(new RegExp(`^(${PREFIXES.join("|")})`), "").replace(/_/g, " ");
+  // Revisions of one map ("rush_001") read as the map itself.
+  const name = key
+    .replace(new RegExp(`^(${PREFIXES.join("|")})`), "")
+    .replace(/_\d{3}$/, "")
+    .replace(/_/g, " ");
   return name.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 

@@ -144,5 +144,6 @@ export const developmentMatches: MatchRecord[] = [
     thumbnailTone: "mirage",
   },
   compactMatch("inferno-02", "de_inferno", "premier", [11, 13], "inferno", `${baseDate}T16:20:00Z`, [1, 0, 2, 0, 1, 0, 1, 0]),
+  compactMatch("rush-04", "rush_001", "rush", [15, 11], "mirage", `${baseDate}T21:10:00Z`, [2, 1, 0, 3, 1, 1, 2, 0, 1, 2, 0, 1, 1, 0, 2]),
   compactMatch("ancient-03", "DE_ANCIENT | RETAKE #61 | TR | XPLAY.GG", "competitive", [13, 5], "ancient", "2026-08-25T19:10:00Z", [0, 1, 0, 1, 1, 0, 2, 0]),
 ];
