@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { FolderOpen } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -13,208 +13,363 @@ import {
   type Cs2SetupStatus,
   type RecordingSettings,
 } from "../data/matchRepository";
+import { weaponIcon } from "../lib/weapons";
 import { playSound } from "../overlay/sounds";
+import mirage from "../../assets/map_splash/mirage.jpg";
+import logo from "../../assets/branding/logo.png";
 
-const displayStoragePath = (path?: string) => {
+const displayPath = (path?: string) => {
   if (!path) return "Loading…";
   return path.startsWith("\\\\?\\") ? path.slice(4) : path;
 };
 
+function Setting({ label, help, disabled, children }: { label: string; help?: string; disabled?: boolean; children: ReactNode }) {
+  return (
+    <div className={`oc-setting ${disabled ? "off" : ""}`}>
+      <div><strong>{label}</strong>{help && <small>{help}</small>}</div>
+      {children}
+    </div>
+  );
+}
+
+function Switch({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <button aria-checked={checked} aria-label={label} className="oc-switch" disabled={disabled} onClick={() => onChange(!checked)} role="switch" type="button">
+      <i />
+    </button>
+  );
+}
+
+function Segmented<T extends string | number>({ label, value, options, disabled, onChange }: {
+  label: string;
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  disabled?: boolean;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div aria-label={label} className="oc-seg" role="group">
+      {options.map((option) => (
+        <button
+          aria-pressed={option.value === value}
+          className={option.value === value ? "active" : ""}
+          disabled={disabled}
+          key={String(option.value)}
+          onClick={() => onChange(option.value)}
+          type="button"
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const SECTIONS = [
+  { id: "capture", label: "Capture" },
+  { id: "moments", label: "Moments" },
+  { id: "overlay", label: "Overlay and sounds" },
+  { id: "storage", label: "Storage" },
+  { id: "shortcuts", label: "Shortcuts" },
+  { id: "game", label: "Counter-Strike 2" },
+  { id: "appearance", label: "Appearance" },
+] as const;
+
 export function SettingsPage() {
   const [setup, setSetup] = useState<Cs2SetupStatus | null>(null);
-  const [setupError, setSetupError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [settings, setSettings] = useState<RecordingSettings | null>(null);
   const [microphones, setMicrophones] = useState<AudioDevice[]>([]);
-  const [shortcutDraft, setShortcutDraft] = useState("F8");
-  const [savingShortcut, setSavingShortcut] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [active, setActive] = useState<string>(SECTIONS[0].id);
+  const refs = useRef(new Map<string, HTMLElement>());
 
-  const refreshSetup = () => getCs2SetupStatus().then(setSetup).catch((error) => setSetupError(String(error)));
+  const refreshSetup = () => getCs2SetupStatus().then(setSetup).catch((failure) => setError(String(failure)));
   useEffect(() => {
     void refreshSetup();
-    void getSettings().then((loaded) => { setSettings(loaded); setShortcutDraft(loaded.manualReplayShortcut); }).catch((error) => setSetupError(String(error)));
-    void getMicrophoneDevices().then(setMicrophones).catch((error) => setSetupError(String(error)));
+    void getSettings().then(setSettings).catch((failure) => setError(String(failure)));
+    void getMicrophoneDevices().then(setMicrophones).catch((failure) => setError(String(failure)));
   }, []);
 
   useEffect(() => {
     if (settings) document.documentElement.dataset.accent = settings.accent;
   }, [settings?.accent]);
 
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (visible) setActive(visible.target.id);
+      },
+      { rootMargin: "-20% 0px -65% 0px" },
+    );
+    refs.current.forEach((node) => observer.observe(node));
+    return () => observer.disconnect();
+  }, []);
+
   const save = (next: RecordingSettings) => {
     setSettings(next);
-    void updateSettings(next).catch((error) => setSetupError(String(error)));
+    updateSettings(next).catch((failure) => setError(failure instanceof Error ? failure.message : String(failure)));
   };
 
-  // The slider only moves local state while dragging; the value is stored (and heard) on release.
+  // The slider moves local state while dragging; the value is stored (and heard) on release.
   const commitVolume = (audible: boolean) => {
     if (!settings) return;
-    void updateSettings(settings).catch((error) => setSetupError(String(error)));
+    updateSettings(settings).catch((failure) => setError(String(failure)));
     if (audible) playSound("captured", settings.soundVolume);
   };
 
   const install = async () => {
     setInstalling(true);
-    setSetupError(null);
+    setError(null);
     try {
       await installCs2GsiConfig();
       await refreshSetup();
-    } catch (error) {
-      setSetupError(error instanceof Error ? error.message : String(error));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setInstalling(false);
     }
   };
 
   const chooseStorage = async () => {
-    setSetupError(null);
+    setError(null);
     try {
       const selected = await open({ directory: true, multiple: false, title: "Choose OpenClip clip location" });
       if (selected) setSettings(await setStoragePath(selected));
-    } catch (error) {
-      setSetupError(error instanceof Error ? error.message : String(error));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
     }
   };
 
-  const captureShortcut = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
-    event.preventDefault();
-    const modifiers = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Super"].filter(Boolean);
-    const key = event.key === " " ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key;
-    setShortcutDraft([...modifiers, key].join("+"));
-  };
+  useEffect(() => {
+    if (!listening || !settings) return;
+    const onKey = async (event: KeyboardEvent) => {
+      if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Escape") {
+        setListening(false);
+        return;
+      }
+      const modifiers = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Super"].filter(Boolean);
+      const key = event.key === " " ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+      const next = { ...settings, manualReplayShortcut: [...modifiers, key].join("+") };
+      setListening(false);
+      try {
+        await updateSettings(next);
+        setSettings(next);
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [listening, settings]);
 
-  const applyShortcut = async () => {
-    if (!settings || shortcutDraft === settings.manualReplayShortcut) return;
-    setSavingShortcut(true);
-    setSetupError(null);
-    const next = { ...settings, manualReplayShortcut: shortcutDraft };
-    try {
-      await updateSettings(next);
-      setSettings(next);
-    } catch (error) {
-      setShortcutDraft(settings.manualReplayShortcut);
-      setSetupError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSavingShortcut(false);
-    }
-  };
+  const s = settings;
+  const overlayOff = !s?.showClipNotifications;
+  const ak = weaponIcon("weapon_ak47");
 
   return (
-    <div className="page settings-page">
-      <header className="page-header">
-        <div><h1>Settings</h1><p>Recording defaults designed for high-quality local clips.</p></div>
+    <div className="oc-page">
+      <header className="oc-head">
+        <div>
+          <h1>Settings</h1>
+          <p>Changes apply immediately. Capture changes restart the recorder.</p>
+        </div>
       </header>
+      {error && <div className="oc-error" role="alert">{error}</div>}
 
-      <section className="settings-panel integration-panel">
-        <div className="settings-heading"><h2>Counter-Strike 2 integration</h2><p>{setupError ?? setup?.message ?? "Checking CS2 installation…"}</p></div>
-        <button className="secondary-button" disabled={!setup?.found || setup.configured || installing} onClick={() => void install()} type="button">
-          {setup?.configured ? "Configuration installed" : installing ? "Installing…" : "Install GSI configuration"}
-        </button>
-      </section>
+      <div className="oc-settings">
+        <nav aria-label="Settings sections" className="oc-subnav">
+          {SECTIONS.map((section) => (
+            <button
+              className={active === section.id ? "active" : ""}
+              key={section.id}
+              onClick={() => {
+                setActive(section.id);
+                refs.current.get(section.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+              type="button"
+            >
+              {section.label}
+            </button>
+          ))}
+        </nav>
 
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Recording</h2><p>Capture changes restart the replay window so every saved clip stays compatible.</p></div>
-        <div className="settings-grid">
-          <label><span>Quality</span><select disabled={!settings} value={settings?.quality ?? "high"} onChange={(event) => settings && save({ ...settings, quality: event.target.value as RecordingSettings["quality"] })}><option value="performance">Performance</option><option value="high">High</option><option value="ultra">Ultra</option></select></label>
-          <label><span>Resolution</span><select disabled={!settings} value={settings?.resolution ?? "game_resolution"} onChange={(event) => settings && save({ ...settings, resolution: event.target.value as RecordingSettings["resolution"] })}><option value="game_resolution">Game resolution</option><option value="p1080">1080p</option><option value="p1440">1440p</option></select></label>
-          <label><span>Frame rate</span><select disabled={!settings} value={settings?.framesPerSecond ?? 60} onChange={(event) => settings && save({ ...settings, framesPerSecond: Number(event.target.value) })}><option value={30}>30 FPS</option><option value={60}>60 FPS</option></select></label>
-        </div>
-        <div className="toggle-list recording-toggles">
-          <label className="toggle-row"><span><strong>Game audio</strong><small>Record audio from the CS2 process tree</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureGameAudio ?? false} onChange={(event) => settings && save({ ...settings, captureGameAudio: event.target.checked })} /><i /></label>
-        </div>
-      </section>
+        <div className="oc-sections">
+          <section className="oc-card oc-section" id="capture" ref={(node) => { if (node) refs.current.set("capture", node); }}>
+            <h2>Capture</h2>
+            <p>How OpenClip records CS2. Hardware encoding runs on your NVIDIA GPU.</p>
+            <Setting label="Quality" help="Higher quality uses more disk space per clip.">
+              <Segmented disabled={!s} label="Quality" onChange={(quality) => s && save({ ...s, quality })} options={[{ value: "performance", label: "Performance" }, { value: "high", label: "High" }, { value: "ultra", label: "Ultra" }]} value={s?.quality ?? "high"} />
+            </Setting>
+            <Setting label="Resolution" help="Match the game, or scale clips down.">
+              <select aria-label="Resolution" className="oc-select" disabled={!s} onChange={(event) => s && save({ ...s, resolution: event.target.value as RecordingSettings["resolution"] })} value={s?.resolution ?? "game_resolution"}>
+                <option value="game_resolution">Game resolution</option><option value="p1080">1080p</option><option value="p1440">1440p</option>
+              </select>
+            </Setting>
+            <Setting label="Frame rate" help="Clips are recorded at a steady frame rate.">
+              <Segmented disabled={!s} label="Frame rate" onChange={(framesPerSecond) => s && save({ ...s, framesPerSecond })} options={[{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }]} value={s?.framesPerSecond ?? 60} />
+            </Setting>
+            <Setting label="Game audio" help="Record sound from the CS2 process.">
+              <Switch checked={s?.captureGameAudio ?? false} disabled={!s} label="Game audio" onChange={(captureGameAudio) => s && save({ ...s, captureGameAudio })} />
+            </Setting>
+            <Setting label="Microphone" help="Mix your microphone into the clip's audio track.">
+              <Switch checked={s?.captureMicrophone ?? false} disabled={!s} label="Microphone" onChange={(captureMicrophone) => s && save({ ...s, captureMicrophone })} />
+            </Setting>
+            <Setting disabled={!s?.captureMicrophone} label="Input device" help="Which microphone to record.">
+              <select aria-label="Input device" className="oc-select" disabled={!s || !s.captureMicrophone} onChange={(event) => s && save({ ...s, microphoneDeviceId: event.target.value || null })} value={s?.microphoneDeviceId ?? ""}>
+                <option value="">Windows default microphone</option>
+                {microphones.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}
+              </select>
+            </Setting>
+          </section>
 
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Microphone</h2><p>Mix an input device with CS2 audio in captured clips.</p></div>
-        <div className="toggle-list">
-          <label className="toggle-row"><span><strong>Capture microphone</strong><small>Recorded and mixed into the clip's AAC track</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureMicrophone ?? false} onChange={(event) => settings && save({ ...settings, captureMicrophone: event.target.checked })} /><i /></label>
-        </div>
-        <div className="settings-grid microphone-grid">
-          <label><span>Input device</span><select disabled={!settings || !settings.captureMicrophone} value={settings?.microphoneDeviceId ?? ""} onChange={(event) => settings && save({ ...settings, microphoneDeviceId: event.target.value || null })}><option value="">Windows default microphone</option>{microphones.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select></label>
-        </div>
-      </section>
+          <section className="oc-card oc-section" id="moments" ref={(node) => { if (node) refs.current.set("moments", node); }}>
+            <h2>Moments</h2>
+            <p>Which plays become clips, and how much context each one includes.</p>
+            <Setting label="Kills" help="Create a clip for ordinary kills.">
+              <Switch checked={s?.captureKills ?? false} disabled={!s} label="Kills" onChange={(captureKills) => s && save({ ...s, captureKills })} />
+            </Setting>
+            <Setting label="Headshots" help="Known headshots score higher.">
+              <Switch checked={s?.captureHeadshots ?? false} disabled={!s} label="Headshots" onChange={(captureHeadshots) => s && save({ ...s, captureHeadshots })} />
+            </Setting>
+            <Setting label="Multi-kills" help="Merge nearby kills in the same round into one clip.">
+              <Switch checked={s?.captureMultiKills ?? false} disabled={!s} label="Multi-kills" onChange={(captureMultiKills) => s && save({ ...s, captureMultiKills })} />
+            </Setting>
+            <Setting label="Before the kill" help="Footage kept ahead of the first kill.">
+              <Segmented disabled={!s} label="Before the kill" onChange={(preRollSeconds) => s && save({ ...s, preRollSeconds })} options={[5, 10, 15].map((value) => ({ value, label: `${value} s` }))} value={s?.preRollSeconds ?? 10} />
+            </Setting>
+            <Setting label="After the kill" help="Footage kept after the last kill.">
+              <Segmented disabled={!s} label="After the kill" onChange={(postRollSeconds) => s && save({ ...s, postRollSeconds })} options={[3, 5, 8, 10].map((value) => ({ value, label: `${value} s` }))} value={s?.postRollSeconds ?? 5} />
+            </Setting>
+          </section>
 
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Automatic capture</h2><p>Nearby qualifying events merge until the post-roll window expires.</p></div>
-        <div className="toggle-list">
-          <label className="toggle-row"><span><strong>Kills</strong><small>Ordinary kills can create automatic moments</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureKills ?? false} onChange={(event) => settings && save({ ...settings, captureKills: event.target.checked })} /><i /></label>
-          <label className="toggle-row"><span><strong>Headshots</strong><small>Known GSI headshots receive extra importance</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureHeadshots ?? false} onChange={(event) => settings && save({ ...settings, captureHeadshots: event.target.checked })} /><i /></label>
-          <label className="toggle-row"><span><strong>Multi-kills</strong><small>Merge nearby kills within the same round</small></span><input disabled={!settings} type="checkbox" checked={settings?.captureMultiKills ?? false} onChange={(event) => settings && save({ ...settings, captureMultiKills: event.target.checked })} /><i /></label>
-        </div>
-        <div className="settings-grid compact-settings">
-          <label><span>Before event</span><select disabled={!settings} value={settings?.preRollSeconds ?? 10} onChange={(event) => settings && save({ ...settings, preRollSeconds: Number(event.target.value) })}>{[5, 10, 15].map((seconds) => <option key={seconds} value={seconds}>{seconds} seconds</option>)}</select></label>
-          <label><span>After event</span><select disabled={!settings} value={settings?.postRollSeconds ?? 5} onChange={(event) => settings && save({ ...settings, postRollSeconds: Number(event.target.value) })}>{[3, 5, 8, 10].map((seconds) => <option key={seconds} value={seconds}>{seconds} seconds</option>)}</select></label>
-        </div>
-      </section>
+          <section className="oc-card oc-section" id="overlay" ref={(node) => { if (node) refs.current.set("overlay", node); }}>
+            <h2>Overlay and sounds</h2>
+            <p>A confirmation after each moment is saved. It never appears during the play, so it is never in your footage. It works over borderless and windowed CS2, not exclusive fullscreen.</p>
+            <Setting label="Capture overlay" help="Tells you whether a play was captured, partial or missed.">
+              <Switch checked={s?.showClipNotifications ?? true} disabled={!s} label="Capture overlay" onChange={(showClipNotifications) => s && save({ ...s, showClipNotifications })} />
+            </Setting>
+            <Setting disabled={overlayOff} label="Position" help="Bottom corners are not offered because they cover your health, armor and ammo.">
+              <Segmented disabled={!s || overlayOff} label="Overlay position" onChange={(overlayPosition) => s && save({ ...s, overlayPosition })} options={[{ value: "top_left", label: "Top left" }, { value: "top_right", label: "Top right" }]} value={s?.overlayPosition ?? "top_left"} />
+            </Setting>
+            <Setting disabled={overlayOff} label="Clip preview" help="Plays the last few seconds of the saved clip under the confirmation.">
+              <Switch checked={s?.overlayClipPreview ?? true} disabled={!s || overlayOff} label="Clip preview" onChange={(overlayClipPreview) => s && save({ ...s, overlayClipPreview })} />
+            </Setting>
+            <Setting label="Notification sounds" help="Turn off to keep OpenClip completely silent.">
+              <Switch checked={s?.soundsEnabled ?? true} disabled={!s} label="Notification sounds" onChange={(soundsEnabled) => s && save({ ...s, soundsEnabled })} />
+            </Setting>
+            <Setting disabled={!s?.soundsEnabled} label="Volume" help="Applies to the captured and error sounds.">
+              <div className="oc-slider">
+                <input
+                  aria-label="Notification volume"
+                  disabled={!s || !s.soundsEnabled}
+                  max={100}
+                  min={0}
+                  onBlur={() => commitVolume(false)}
+                  onChange={(event) => s && setSettings({ ...s, soundVolume: Number(event.target.value) })}
+                  onKeyUp={(event) => { if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") commitVolume(true); }}
+                  onPointerUp={() => commitVolume(true)}
+                  step={5}
+                  style={{ "--fill": `${s?.soundVolume ?? 60}%` } as CSSProperties}
+                  type="range"
+                  value={s?.soundVolume ?? 60}
+                />
+                <output>{s?.soundVolume ?? 60}%</output>
+              </div>
+            </Setting>
+            <div className="oc-preview">
+              <div className="oc-preview-head">
+                <strong>Preview</strong>
+                <div className="oc-actions">
+                  <button className="oc-btn small" disabled={!s} onClick={() => void previewOverlay("captured")} type="button">Test captured</button>
+                  <button className="oc-btn small" disabled={!s} onClick={() => void previewOverlay("partial")} type="button">Partial</button>
+                  <button className="oc-btn small" disabled={!s} onClick={() => void previewOverlay("failed")} type="button">Failed</button>
+                  <button className="oc-btn small" disabled={!s || !s.soundsEnabled} onClick={() => s && playSound("captured", s.soundVolume)} type="button">Test sound</button>
+                </div>
+              </div>
+              <div className="oc-screen">
+                <img alt="" src={mirage} />
+                <span className="oc-zone" style={{ left: 14 }}>Health and armor</span>
+                <span className="oc-zone" style={{ right: 14 }}>Ammo</span>
+                <div className={`oc-mini ${s?.overlayPosition === "top_right" ? "right" : "left"}`} style={{ opacity: overlayOff ? 0.35 : 1 }}>
+                  <span className="logo"><img alt="" src={logo} /></span>
+                  <div>
+                    <em>Clip captured</em>
+                    <strong>Quad Kill</strong>
+                    <small>4 kills {ak && <img alt="AK-47" src={ak} />}</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
 
-      <section className="settings-panel storage-panel">
-        <div className="settings-heading"><h2>Storage</h2><p>Video stays on your machine.</p></div>
-        <div className="storage-path-row"><div className="path-button"><FolderOpen size={17} /><span>{displayStoragePath(settings?.storagePath)}</span></div><button className="secondary-button" disabled={!settings} onClick={() => void chooseStorage()} type="button">Change folder</button></div>
-      </section>
+          <section className="oc-card oc-section" id="storage" ref={(node) => { if (node) refs.current.set("storage", node); }}>
+            <h2>Storage</h2>
+            <p>Video stays on your computer. Nothing is uploaded.</p>
+            <Setting label="Clip folder" help="New clips are saved here. Existing clips stay where they are.">
+              <div className="oc-path">
+                <span title={displayPath(s?.storagePath)}><FolderOpen size={16} />{displayPath(s?.storagePath)}</span>
+                <button className="oc-btn" disabled={!s} onClick={() => void chooseStorage()} type="button">Change</button>
+              </div>
+            </Setting>
+          </section>
 
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Manual replay shortcut</h2><p>Works globally while OpenClip is running.</p></div>
-        <div className="shortcut-setting">
-          <label><span>Shortcut</span><input aria-label="Manual replay shortcut" disabled={!settings || savingShortcut} onKeyDown={captureShortcut} readOnly value={shortcutDraft} /></label>
-          <button className="secondary-button" disabled={!settings || savingShortcut || shortcutDraft === settings.manualReplayShortcut} onClick={() => void applyShortcut()} type="button">{savingShortcut ? "Applying…" : "Apply"}</button>
-        </div>
-        <small className="settings-help">Click the field, then press a key or combination such as F8 or Ctrl+Shift+S.</small>
-      </section>
+          <section className="oc-card oc-section" id="shortcuts" ref={(node) => { if (node) refs.current.set("shortcuts", node); }}>
+            <h2>Shortcuts</h2>
+            <p>Works anywhere in Windows while OpenClip is running.</p>
+            <Setting label="Save replay now" help="Saves the last 15 seconds as a manual clip.">
+              <div className="oc-path">
+                <kbd className={`oc-key ${listening ? "listening" : ""}`}>{listening ? "Press keys…" : s?.manualReplayShortcut ?? "F8"}</kbd>
+                <button className="oc-btn" disabled={!s} onClick={() => setListening((value) => !value)} type="button">{listening ? "Cancel" : "Change"}</button>
+              </div>
+            </Setting>
+          </section>
 
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Appearance and behavior</h2><p>Restrained preferences for capture feedback and intentional accents.</p></div>
-        <div className="settings-grid compact-settings">
-          <label><span>Accent</span><select disabled={!settings} value={settings?.accent ?? "mint"} onChange={(event) => settings && save({ ...settings, accent: event.target.value as RecordingSettings["accent"] })}><option value="mint">Mint</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="neutral">Neutral</option></select></label>
-        </div>
-        <div className="toggle-list recording-toggles">
-          <label className="toggle-row"><span><strong>Animated export watermark</strong><small>Optional OpenClip mark in the top-right of exported clips</small></span><input disabled={!settings} type="checkbox" checked={settings?.watermarkEnabled ?? false} onChange={(event) => settings && save({ ...settings, watermarkEnabled: event.target.checked })} /><i /></label>
-        </div>
-      </section>
+          <section className="oc-card oc-section" id="game" ref={(node) => { if (node) refs.current.set("game", node); }}>
+            <h2>Counter-Strike 2</h2>
+            <p>OpenClip reads game events through CS2 Game State Integration.</p>
+            <Setting label="Game integration" help={setup?.message ?? "Checking your CS2 installation…"}>
+              <div className="oc-path">
+                {setup && (
+                  <span className={`oc-badge ${setup.configured ? "" : "warn"}`} style={{ border: 0, padding: "0 12px", background: undefined, maxWidth: "none" }}>
+                    <i />{setup.configured ? "Connected" : setup.found ? "Not installed" : "CS2 not found"}
+                  </span>
+                )}
+                <button className="oc-btn" disabled={!setup?.found || setup.configured || installing} onClick={() => void install()} type="button">
+                  {installing ? "Installing…" : setup?.configured ? "Installed" : "Install"}
+                </button>
+              </div>
+            </Setting>
+          </section>
 
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Capture overlay</h2><p>Confirms each moment after it is saved, so it is never part of the footage. Works over borderless and windowed CS2, not exclusive fullscreen.</p></div>
-        <div className="toggle-list recording-toggles">
-          <label className="toggle-row"><span><strong>Show capture overlay</strong><small>Tells you whether a kill, multi-kill or ace was captured</small></span><input disabled={!settings} type="checkbox" checked={settings?.showClipNotifications ?? true} onChange={(event) => settings && save({ ...settings, showClipNotifications: event.target.checked })} /><i /></label>
-          <label className="toggle-row"><span><strong>Clip preview</strong><small>Plays the last few seconds of the saved clip under the confirmation</small></span><input disabled={!settings || !settings.showClipNotifications} type="checkbox" checked={settings?.overlayClipPreview ?? true} onChange={(event) => settings && save({ ...settings, overlayClipPreview: event.target.checked })} /><i /></label>
+          <section className="oc-card oc-section" id="appearance" ref={(node) => { if (node) refs.current.set("appearance", node); }}>
+            <h2>Appearance</h2>
+            <p>Small touches. The app stays dark.</p>
+            <Setting label="Accent color" help="Used for highlights, markers and status.">
+              <div className="oc-swatches">
+                {([["mint", "#72d5a8"], ["blue", "#74aef5"], ["purple", "#b79af4"], ["neutral", "#c7cbd2"]] as const).map(([value, color]) => (
+                  <button
+                    aria-label={value}
+                    aria-pressed={s?.accent === value}
+                    className={s?.accent === value ? "active" : ""}
+                    key={value}
+                    onClick={() => s && save({ ...s, accent: value })}
+                    style={{ background: color }}
+                    type="button"
+                  />
+                ))}
+              </div>
+            </Setting>
+            <Setting label="Export watermark" help="Adds the OpenClip mark to the top right of exported clips.">
+              <Switch checked={s?.watermarkEnabled ?? false} disabled={!s} label="Export watermark" onChange={(watermarkEnabled) => s && save({ ...s, watermarkEnabled })} />
+            </Setting>
+          </section>
         </div>
-        <div className="settings-grid compact-settings overlay-position">
-          <label><span>Position</span><select disabled={!settings || !settings.showClipNotifications} value={settings?.overlayPosition ?? "top_left"} onChange={(event) => settings && save({ ...settings, overlayPosition: event.target.value as RecordingSettings["overlayPosition"] })}><option value="top_left">Top left</option><option value="top_right">Top right</option></select></label>
-        </div>
-        <small className="settings-help">Bottom corners are not offered because they cover your health, armor and ammo.</small>
-        <div className="overlay-test">
-          <span>Test overlay</span>
-          <button className="secondary-button" disabled={!settings} onClick={() => void previewOverlay("captured")} type="button">Captured</button>
-          <button className="secondary-button" disabled={!settings} onClick={() => void previewOverlay("partial")} type="button">Partial</button>
-          <button className="secondary-button" disabled={!settings} onClick={() => void previewOverlay("failed")} type="button">Failed</button>
-        </div>
-      </section>
-
-      <section className="settings-panel">
-        <div className="settings-heading"><h2>Sounds</h2><p>Plays with the capture overlay when a moment is saved or missed.</p></div>
-        <div className="toggle-list recording-toggles">
-          <label className="toggle-row"><span><strong>Notification sounds</strong><small>Turn off to keep OpenClip completely silent</small></span><input disabled={!settings} type="checkbox" checked={settings?.soundsEnabled ?? true} onChange={(event) => settings && save({ ...settings, soundsEnabled: event.target.checked })} /><i /></label>
-        </div>
-        <div className="volume-setting" data-disabled={!settings?.soundsEnabled}>
-          <label>
-            <span>Volume</span>
-            <input
-              aria-label="Notification volume"
-              disabled={!settings || !settings.soundsEnabled}
-              max={100}
-              min={0}
-              onBlur={() => commitVolume(false)}
-              onChange={(event) => settings && setSettings({ ...settings, soundVolume: Number(event.target.value) })}
-              onKeyUp={(event) => { if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") commitVolume(true); }}
-              onPointerUp={() => commitVolume(true)}
-              step={5}
-              style={{ "--fill": `${settings?.soundVolume ?? 60}%` } as CSSProperties}
-              type="range"
-              value={settings?.soundVolume ?? 60}
-            />
-            <output>{settings?.soundVolume ?? 60}%</output>
-          </label>
-          <button className="secondary-button" disabled={!settings || !settings.soundsEnabled} onClick={() => settings && playSound("captured", settings.soundVolume)} type="button">Test sound</button>
-        </div></section>
+      </div>
     </div>
   );
 }

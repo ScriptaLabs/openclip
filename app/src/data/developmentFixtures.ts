@@ -8,7 +8,7 @@ function gameEvent(
   index: number,
   eventType: GameEvent["eventType"],
   matchOffsetMs: number,
-  weapon = "AK-47",
+  weapon = "weapon_ak47",
 ): GameEvent {
   return {
     id: `${matchId}-event-${index}`,
@@ -29,7 +29,7 @@ function makeRound(matchId: string, number: number, killCount: number, headshots
     const offset = number * 90_000 + index * 3_000;
     events.push(gameEvent(matchId, roundId, number * 10 + index, "kill", offset));
     if (index < headshots) {
-      events.push(gameEvent(matchId, roundId, number * 20 + index, "headshot", offset, "AK-47"));
+      events.push(gameEvent(matchId, roundId, number * 20 + index, "headshot", offset, "weapon_ak47"));
     }
   }
   return {
@@ -61,7 +61,7 @@ function makeMoment(
     events,
     classification: events.filter((event) => event.eventType === "kill").length >= 3 ? "triple_kill" : events.filter((event) => event.eventType === "kill").length === 2 ? "double_kill" : "kill",
     importance: 20 + events.length * 10,
-    clipPath: null,
+    clipPath: "fixture-clip.mp4",
     clipId: null,
     isFavorite: index === 1,
     title,
@@ -144,5 +144,5 @@ export const developmentMatches: MatchRecord[] = [
     thumbnailTone: "mirage",
   },
   compactMatch("inferno-02", "de_inferno", "premier", [11, 13], "inferno", `${baseDate}T16:20:00Z`, [1, 0, 2, 0, 1, 0, 1, 0]),
-  compactMatch("ancient-03", "de_ancient", "competitive", [13, 5], "ancient", "2026-08-25T19:10:00Z", [0, 1, 0, 1, 1, 0, 2, 0]),
+  compactMatch("ancient-03", "DE_ANCIENT | RETAKE #61 | TR | XPLAY.GG", "competitive", [13, 5], "ancient", "2026-08-25T19:10:00Z", [0, 1, 0, 1, 1, 0, 2, 0]),
 ];

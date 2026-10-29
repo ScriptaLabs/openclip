@@ -48,11 +48,41 @@ impl<R: MatchRepository> GsiService<R> {
         }
     }
 
+    /// Closes the active match when the GSI stream has been silent for `idle`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the adapter or database lock is poisoned, or the update cannot be stored.
+    pub fn close_idle_match(&self, idle: chrono::Duration) -> openclip_core::Result<()> {
+        let update = self
+            .adapter
+            .lock()
+            .map_err(|_| OpenClipError::Unavailable("CS2 adapter lock was poisoned".to_owned()))?
+            .close_if_idle(chrono::Utc::now(), idle);
+        if update.is_empty() {
+            return Ok(());
+        }
+        self.repository
+            .lock()
+            .map_err(|_| OpenClipError::Storage("database lock was poisoned".to_owned()))?
+            .apply_game_update(&update)?;
+        if let Some(observer) = &self.observer {
+            observer(&update);
+        }
+        if let Ok(mut status) = self.status.write() {
+            status.state = Cs2ConnectionState::WaitingForGame;
+            status.map = None;
+            status.active_match_id = None;
+            "Waiting for Counter-Strike 2".clone_into(&mut status.message);
+        }
+        Ok(())
+    }
+
     fn process(&self, data: &[u8]) -> openclip_core::Result<()> {
         let payload: GsiPayload = serde_json::from_slice(data)
             .map_err(|error| OpenClipError::InvalidGameState(error.to_string()))?;
         let timestamp = payload.timestamp();
-        let map = payload.map_name().map(str::to_owned);
+        let map = payload.normalized_map_name();
         let mut adapter = self
             .adapter
             .lock()

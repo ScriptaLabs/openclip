@@ -4,7 +4,7 @@ use openclip_core::{
     GameStateUpdate, Match, MatchId, MatchMode, OpenClipError, Round, RoundId,
 };
 use serde_json::{Map, Value, json};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::models::{GsiMap, GsiPayload, MapPhase, RoundPhase};
 
@@ -18,7 +18,12 @@ pub struct Cs2Adapter {
     last_round_headshots: Option<u16>,
     last_weapon: Option<WeaponSnapshot>,
     shots_since_last_kill: u16,
+    last_payload_at: Option<DateTime<Utc>>,
 }
+
+/// A real player cannot score more than this many kills between two GSI updates (they are sent
+/// at most every 0.1 s). A larger jump means updates were missed, so it is a resync, not kills.
+const MAX_KILLS_PER_UPDATE: u16 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WeaponSnapshot {
@@ -38,6 +43,21 @@ impl Cs2Adapter {
         Ok(self.process_payload(payload))
     }
 
+    /// Ends a match whose GSI stream went silent (CS2 closed, crashed or lost its connection).
+    /// CS2 sends a heartbeat every few seconds, so a long gap means the game is gone.
+    #[must_use]
+    pub fn close_if_idle(&mut self, now: DateTime<Utc>, idle: chrono::Duration) -> GameStateUpdate {
+        let mut update = GameStateUpdate::default();
+        let silent = self
+            .last_payload_at
+            .is_some_and(|last| now.signed_duration_since(last) >= idle);
+        if silent && self.active_match.is_some() {
+            info!("GSI went silent; closing the active match");
+            self.finish_match(now, &mut update);
+        }
+        update
+    }
+
     #[must_use]
     pub fn active_match(&self) -> Option<&Match> {
         self.active_match.as_ref()
@@ -47,6 +67,7 @@ impl Cs2Adapter {
     pub fn process_payload(&mut self, payload: GsiPayload) -> GameStateUpdate {
         let timestamp = payload.timestamp();
         let mut update = GameStateUpdate::default();
+        self.last_payload_at = Some(timestamp);
 
         self.ensure_session(&payload, timestamp, &mut update);
         self.update_match_lifecycle(&payload, timestamp, &mut update);
@@ -106,14 +127,14 @@ impl Cs2Adapter {
         update: &mut GameStateUpdate,
     ) {
         let map = payload.map.as_ref();
-        let map_name = payload.map_name();
+        let map_name = payload.normalized_map_name();
         let phase = map.and_then(|map| map.phase);
         let is_live = phase == Some(MapPhase::Live);
         let changed_map = self
             .active_match
             .as_ref()
             .and_then(|game_match| game_match.map.as_deref())
-            .zip(map_name)
+            .zip(map_name.as_deref())
             .is_some_and(|(previous, current)| previous != current);
         let restarted = is_live && self.match_counters_restarted(payload);
 
@@ -154,7 +175,7 @@ impl Cs2Adapter {
         let game_match = Match {
             id: MatchId::new(),
             session_id,
-            map: payload.map_name().map(str::to_owned),
+            map: payload.normalized_map_name(),
             mode: map
                 .and_then(|map| map.mode.as_deref())
                 .map_or(MatchMode::Unknown, parse_mode),
@@ -284,6 +305,19 @@ impl Cs2Adapter {
         }
 
         let kill_delta = current_kills - previous_kills;
+        if kill_delta > MAX_KILLS_PER_UPDATE {
+            warn!(
+                match_id = %game_match.id,
+                previous_kills,
+                current_kills,
+                "kill counter jumped further than one update allows; resynchronizing"
+            );
+            self.last_kills = Some(current_kills);
+            if let Some(headshots) = current_headshots {
+                self.last_round_headshots = Some(headshots);
+            }
+            return;
+        }
         let headshot_delta = current_headshots
             .zip(self.last_round_headshots)
             .map_or(0, |(current, previous)| current.saturating_sub(previous));

@@ -303,13 +303,25 @@ fn open_moment_clip(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn get_moment_thumbnail(
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipMedia {
+    clip_path: String,
+    thumbnail_path: Option<String>,
+}
+
+/// Verbatim (`\\?\`) prefixes are valid on disk but not in the URLs the webview builds.
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+}
+
+/// A moment's clip file, and how many seconds into it the first kill happens (when known).
+fn find_moment_clip(
+    state: &AppState,
     match_id: MatchId,
     moment_id: openclip_core::MomentId,
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(PathBuf, Option<f64>), String> {
     let game_match = state
         .repository
         .lock()
@@ -317,32 +329,99 @@ fn get_moment_thumbnail(
         .get_match(match_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "match was not found".to_owned())?;
-    let clip = game_match
+    let moment = game_match
         .moments
-        .iter()
+        .into_iter()
         .find(|moment| moment.id == moment_id)
-        .and_then(|moment| moment.clip_path.as_ref())
+        .ok_or_else(|| "moment was not found".to_owned())?;
+    let first_kill_seconds = moment
+        .events
+        .iter()
+        .find(|event| event.event_type == GameEventType::Kill)
+        .and_then(|event| event.match_offset_ms)
+        .map(|offset| offset.saturating_sub(moment.start_offset_ms))
+        .map(|millis| std::time::Duration::from_millis(millis).as_secs_f64());
+    let path = moment
+        .clip_path
         .ok_or_else(|| "this moment has no captured video".to_owned())?;
-    if !clip.is_file() {
-        return Err("the captured video file is no longer available".to_owned());
+    if path.is_file() {
+        Ok((path, first_kill_seconds))
+    } else {
+        Err("the captured video file is no longer available".to_owned())
     }
-    let thumbnail = jpeg_thumbnail_path(clip);
-    if !thumbnail.is_file() {
-        generate_jpeg_thumbnail(&app, clip, &thumbnail).map_err(|error| {
-            tracing::warn!(%error, %moment_id, path = %clip.display(), "could not generate requested clip thumbnail");
-            error
-        })?;
+}
+
+/// Grants the webview read access to exactly one clip and its thumbnail, and returns their paths
+/// for `convertFileSrc`. The asset protocol scope stays empty otherwise.
+// Runs on the async pool: generating a thumbnail spawns FFmpeg and must not block the UI thread.
+#[tauri::command(async)]
+fn prepare_clip_media(
+    match_id: MatchId,
+    moment_id: openclip_core::MomentId,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ClipMedia, String> {
+    let (clip, first_kill_seconds) = find_moment_clip(&state, match_id, moment_id)?;
+    let scope = app.asset_protocol_scope();
+    scope.allow_file(&clip).map_err(|error| error.to_string())?;
+    let thumbnail = jpeg_thumbnail_path(&clip);
+    if !thumbnail.is_file()
+        && let Err(error) = generate_jpeg_thumbnail(&app, &clip, &thumbnail, first_kill_seconds)
+    {
+        tracing::warn!(%error, %moment_id, path = %clip.display(), "could not generate clip thumbnail");
     }
-    let bytes = std::fs::read(&thumbnail).map_err(|error| error.to_string())?;
-    if bytes.len() > 2 * 1024 * 1024 {
-        return Err("the generated thumbnail exceeded the safety limit".to_owned());
-    }
-    Ok(bytes)
+    let thumbnail_path = if thumbnail.is_file() && scope.allow_file(&thumbnail).is_ok() {
+        Some(display_path(&thumbnail))
+    } else {
+        None
+    };
+    Ok(ClipMedia {
+        clip_path: display_path(&clip),
+        thumbnail_path,
+    })
+}
+
+#[tauri::command]
+fn set_moment_favorite(
+    match_id: MatchId,
+    moment_id: openclip_core::MomentId,
+    favorite: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut repository = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?;
+    let mut moment = repository
+        .get_match(match_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "match was not found".to_owned())?
+        .moments
+        .into_iter()
+        .find(|moment| moment.id == moment_id)
+        .ok_or_else(|| "moment was not found".to_owned())?;
+    moment.is_favorite = favorite;
+    repository
+        .save_moment(&moment)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reveal_moment_clip(
+    match_id: MatchId,
+    moment_id: openclip_core::MomentId,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (clip, _) = find_moment_clip(&state, match_id, moment_id)?;
+    app.opener()
+        .reveal_item_in_dir(clip)
+        .map_err(|error| error.to_string())
 }
 
 fn jpeg_thumbnail_path(clip: &Path) -> PathBuf {
     let mut name = clip.file_stem().unwrap_or_default().to_os_string();
-    name.push(".thumbnail.jpg");
+    name.push(".thumb.jpg");
     clip.with_file_name(name)
 }
 
@@ -350,6 +429,30 @@ fn generate_jpeg_thumbnail(
     app: &tauri::AppHandle,
     clip: &Path,
     thumbnail: &Path,
+    first_kill_seconds: Option<f64>,
+) -> Result<(), String> {
+    // The frame at the first kill is the most recognizable one; fall back to earlier moments if
+    // the seek lands past the end of a short clip.
+    let mut attempts: Vec<f64> = Vec::new();
+    if let Some(seconds) = first_kill_seconds {
+        attempts.push((seconds - 0.3).max(0.0));
+    }
+    attempts.extend([1.0, 0.0]);
+    let mut last_error = String::new();
+    for seek in attempts {
+        match extract_frame(app, clip, thumbnail, seek) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
+fn extract_frame(
+    app: &tauri::AppHandle,
+    clip: &Path,
+    thumbnail: &Path,
+    seek_seconds: f64,
 ) -> Result<(), String> {
     let partial = thumbnail.with_extension("jpg.partial");
     let ffmpeg = bundled_ffmpeg_path(app);
@@ -360,14 +463,15 @@ fn generate_jpeg_thumbnail(
         command.creation_flags(0x0800_0000);
     }
     let output = command
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", "1"])
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss"])
+        .arg(format!("{seek_seconds:.2}"))
         .arg("-i")
         .arg(clip)
         .args([
             "-frames:v",
             "1",
             "-vf",
-            "scale=480:-2",
+            "scale=640:-2",
             "-c:v",
             "mjpeg",
             "-q:v",
@@ -383,7 +487,8 @@ fn generate_jpeg_thumbnail(
                 ffmpeg.display()
             )
         })?;
-    if !output.status.success() {
+    // A seek past the end exits successfully without writing a frame.
+    if !output.status.success() || !partial.is_file() {
         let _ = std::fs::remove_file(&partial);
         return Err(format!(
             "thumbnail generation failed: {}",
@@ -748,6 +853,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .start()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
 
+    // CS2 sends a heartbeat every few seconds; a long silence means the game closed or crashed,
+    // so the match is finished instead of staying open forever.
+    let idle_gsi = gsi.clone();
+    std::thread::Builder::new()
+        .name("openclip-gsi-idle".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                if let Err(error) = idle_gsi.close_idle_match(chrono::Duration::seconds(60)) {
+                    tracing::warn!(%error, "could not close an idle match");
+                }
+            }
+        })?;
+
     let handler: Arc<dyn openclip_cs2::GsiPayloadHandler> = gsi.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = serve(GsiEndpoint::default(), handler).await {
@@ -789,7 +908,9 @@ pub fn run() {
             update_settings,
             set_storage_path,
             open_moment_clip,
-            get_moment_thumbnail,
+            prepare_clip_media,
+            set_moment_favorite,
+            reveal_moment_clip,
             export_interesting_moments
         ])
         .run(tauri::generate_context!())
@@ -845,7 +966,7 @@ mod tests {
     fn jpeg_thumbnail_is_adjacent_to_its_clip() {
         assert_eq!(
             jpeg_thumbnail_path(Path::new(r"C:\Clips\ace.mp4")),
-            PathBuf::from(r"C:\Clips\ace.thumbnail.jpg")
+            PathBuf::from(r"C:\Clips\ace.thumb.jpg")
         );
     }
 }

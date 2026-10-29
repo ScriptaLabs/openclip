@@ -4,6 +4,22 @@ use chrono::{DateTime, Utc};
 use openclip_core::MatchId;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 
+/// Community and FACEIT-style servers report names like `DE_MIRAGE | RETAKE #61 | TR | XPLAY.GG`
+/// or `workshop/3070923343/de_test`. The engine map name is what identifies the map.
+#[must_use]
+pub fn normalize_map_name(raw: &str) -> String {
+    const PREFIXES: [&str; 5] = ["de_", "cs_", "ar_", "dz_", "gd_"];
+    let lower = raw.to_ascii_lowercase();
+    if let Some(token) = lower
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .find(|token| PREFIXES.iter().any(|prefix| token.starts_with(prefix)))
+    {
+        return token.to_owned();
+    }
+    let first = lower.split('|').next().unwrap_or_default().trim();
+    first.rsplit('/').next().unwrap_or(first).trim().to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GsiPayload {
     pub provider: Option<GsiProvider>,
@@ -186,6 +202,12 @@ impl GsiPayload {
             .filter(|name| !name.is_empty())
     }
 
+    /// The map as a plain engine name (see [`normalize_map_name`]), stable across server renames.
+    #[must_use]
+    pub fn normalized_map_name(&self) -> Option<String> {
+        self.map_name().map(normalize_map_name)
+    }
+
     #[must_use]
     pub fn active_weapon(&self) -> Option<&str> {
         self.player
@@ -260,8 +282,26 @@ mod tests {
         .expect("authoritative state remains parseable");
 
         assert_eq!(payload.map_name(), Some("workshop/3070923343/de_test"));
+        assert_eq!(payload.normalized_map_name().as_deref(), Some("de_test"));
         assert_eq!(payload.player.unwrap().match_stats.unwrap().kills, Some(4));
         assert!(payload.previously.is_none());
         assert!(payload.added.is_none());
+    }
+}
+
+#[cfg(test)]
+mod map_name_tests {
+    use super::normalize_map_name;
+
+    #[test]
+    fn server_style_names_reduce_to_the_engine_map() {
+        assert_eq!(
+            normalize_map_name("DE_MIRAGE | RETAKE #61 | TR | XPLAY.GG"),
+            "de_mirage"
+        );
+        assert_eq!(normalize_map_name("de_inferno"), "de_inferno");
+        assert_eq!(normalize_map_name("workshop/3070923343/de_test"), "de_test");
+        assert_eq!(normalize_map_name("Aim Botz | 128 tick"), "aim botz");
+        assert_eq!(normalize_map_name("workshop/123/aim_botz"), "aim_botz");
     }
 }

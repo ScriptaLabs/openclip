@@ -197,10 +197,6 @@ export async function openMomentClip(matchId: string, momentId: string): Promise
   await invoke("open_moment_clip", { matchId, momentId });
 }
 
-export async function getMomentThumbnail(matchId: string, momentId: string): Promise<number[]> {
-  return isTauri() ? invoke<number[]>("get_moment_thumbnail", { matchId, momentId }) : [];
-}
-
 export async function exportInterestingMoments(matchId: string, destination: string): Promise<string[]> {
   return invoke<string[]>("export_interesting_moments", { matchId, destination });
 }

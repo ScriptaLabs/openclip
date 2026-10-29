@@ -1,3 +1,4 @@
+import { mapKey } from "../lib/maps";
 import agency from "../../assets/map_splash/agency.jpg";
 import ancient from "../../assets/map_splash/ancient.jpg";
 import anubis from "../../assets/map_splash/anubis.jpg";
@@ -26,6 +27,6 @@ const artwork: Record<string, string> = {
 };
 
 export function artworkForMap(map: string | null): string | null {
-  const key = map?.toLowerCase().replace(/^de_|^cs_|^ar_/, "");
+  const key = mapKey(map)?.replace(/^(de|cs|ar|dz|gd)_/, "");
   return key ? artwork[key] ?? null : null;
 }

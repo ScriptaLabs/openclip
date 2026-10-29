@@ -359,6 +359,9 @@ fn special_kill_score(event: &GameEvent) -> f32 {
     score
 }
 
+/// A chain of kills that never pauses (deathmatch, retakes) must not become one endless clip.
+const MAX_MOMENT_SPAN_MS: u64 = 45_000;
+
 impl MomentDetector for WindowedMomentDetector {
     fn ingest(&mut self, event: GameEvent) -> openclip_core::Result<Option<Moment>> {
         let offset = event.match_offset_ms;
@@ -394,6 +397,11 @@ impl MomentDetector for WindowedMomentDetector {
             && active.match_id == event.match_id
             && active.round_id == event.round_id
             && offset <= active.end_offset_ms
+            && active
+                .events
+                .first()
+                .and_then(|first| first.match_offset_ms)
+                .is_none_or(|first| offset.saturating_sub(first) < MAX_MOMENT_SPAN_MS)
             && (self.merge_multi_kills
                 || (event.event_type == GameEventType::Headshot
                     && active.events.last().and_then(|item| item.match_offset_ms) == Some(offset)))
@@ -576,6 +584,32 @@ mod tests {
         assert_eq!(moment.events.len(), 3);
         assert_eq!(moment.classification, MomentClassification::TripleKill);
         assert!((moment.importance - 55.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_unbroken_kill_chain_is_split_into_bounded_moments() {
+        let match_id = MatchId::new();
+        let mut detector = WindowedMomentDetector::new(10_000, 5_000);
+        let mut finalized = Vec::new();
+        // A kill every 4 s for 2 minutes never lets the post-roll expire.
+        for second in (0..120).step_by(4) {
+            let offset = 10_000 + u64::try_from(second).unwrap() * 1_000;
+            if let Some(moment) = detector
+                .ingest(event(match_id, offset, GameEventType::Kill))
+                .unwrap()
+            {
+                finalized.push(moment);
+            }
+        }
+        finalized.extend(detector.flush());
+        assert!(finalized.len() >= 3, "got {} moments", finalized.len());
+        for moment in &finalized {
+            let first = moment.events.first().unwrap().match_offset_ms.unwrap();
+            let last = moment.events.last().unwrap().match_offset_ms.unwrap();
+            assert!(last - first < 45_000);
+        }
+        let kills: usize = finalized.iter().map(|moment| moment.events.len()).sum();
+        assert_eq!(kills, 30, "no kill is dropped by splitting");
     }
 
     #[test]

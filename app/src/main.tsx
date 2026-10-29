@@ -4,7 +4,9 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import OverlayApp, { type OverlayPayload } from "./overlay/OverlayApp";
+import "@fontsource-variable/geist";
 import "./styles.css";
+import "./styles/app.css";
 
 const root = document.getElementById("root");
 if (!root) {
