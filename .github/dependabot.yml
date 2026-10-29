@@ -1,0 +1,10 @@
+# Keeps the GitHub Actions used by CI and releases current, so deprecations never pile up.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

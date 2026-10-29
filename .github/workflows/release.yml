@@ -31,13 +31,13 @@ jobs:
       OPENCLIP_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       OPENCLIP_DOWNLOAD_BASE: ${{ vars.B2_PUBLIC_BASE_URL }}/openclip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           lfs: false
 
       # The bundled ffmpeg.exe lives in Git LFS. Cache it so releases do not eat the LFS bandwidth quota.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .git/lfs/objects
           key: lfs-${{ hashFiles('.gitattributes') }}-${{ hashFiles('dependencies/ffmpeg/*') }}
@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: git lfs pull
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -118,7 +118,7 @@ jobs:
             --endpoint-url "$B2_ENDPOINT" --cache-control "public, max-age=30" --content-type application/json
 
       - name: Publish the GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: OpenClip ${{ steps.version.outputs.version }}
           body: ${{ steps.version.outputs.notes }}
