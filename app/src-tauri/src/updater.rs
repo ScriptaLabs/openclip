@@ -6,7 +6,7 @@
 //! hurt a recording: never while a match is running or a clip is being saved.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -16,6 +16,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 const CHECK_INTERVAL: Duration = Duration::from_hours(6);
 const SAFE_POLL: Duration = Duration::from_secs(20);
+/// How often a waiting update looks for a newer release even without an announcement.
+const RECHECK_WHILE_READY: Duration = Duration::from_mins(5);
 const PROGRESS_STEP: f32 = 0.02;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -167,8 +169,34 @@ impl UpdateService {
         }
     }
 
+    /// A newer release can be announced while an older one waits for a safe moment. Download the
+    /// newer one in its place, so a single restart reaches the latest version.
+    async fn replace_if_newer(&self) {
+        let Ok(updater) = self.app.updater() else {
+            return;
+        };
+        let found = match updater.check().await {
+            Ok(Some(update)) => update,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::debug!(%error, "could not look for a newer update while one is waiting");
+                return;
+            }
+        };
+        let waiting = self.status().available_version;
+        if !replaces_staged(waiting.as_deref(), &found.version) {
+            return;
+        }
+        tracing::info!(version = %found.version, "newer update found while another is waiting");
+        self.stage(found).await;
+    }
+
     async fn stage(&self, update: Update) {
+        let version = update.version.clone();
+        let notes = update.body.clone();
         self.update_status(|status| {
+            status.available_version = Some(version);
+            status.notes = notes;
             status.phase = Phase::Downloading;
             status.progress = 0.0;
         });
@@ -237,10 +265,21 @@ impl UpdateService {
     /// Runs for the life of the app.
     pub(crate) async fn run(self, mut nudges: UnboundedReceiver<()>) {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
+        let mut announced = false;
+        let mut last_recheck = Instant::now();
         loop {
             match self.status().phase {
                 Phase::Ready => {
-                    if (self.policy.auto_update)() && (self.policy.safe_to_install)() {
+                    // Never install a release that has already been superseded: when a new one is
+                    // announced (or every few minutes while waiting), fetch the newest first.
+                    if announced || last_recheck.elapsed() >= RECHECK_WHILE_READY {
+                        self.replace_if_newer().await;
+                        last_recheck = Instant::now();
+                    }
+                    if self.status().phase == Phase::Ready
+                        && (self.policy.auto_update)()
+                        && (self.policy.safe_to_install)()
+                    {
                         self.install();
                     }
                 }
@@ -251,18 +290,40 @@ impl UpdateService {
             } else {
                 CHECK_INTERVAL
             };
-            tokio::select! {
-                () = tokio::time::sleep(wait) => {}
-                nudge = nudges.recv() => if nudge.is_none() { return },
-            }
-            // A release was just announced: look right away, whatever the timer said.
+            // A release being announced wakes this loop right away, whatever the timer said.
+            announced = tokio::select! {
+                () = tokio::time::sleep(wait) => false,
+                nudge = nudges.recv() => {
+                    if nudge.is_none() {
+                        return;
+                    }
+                    true
+                }
+            };
         }
     }
 }
 
+/// Whether a release found while another one waits should take its place. The updater only
+/// reports releases newer than the installed version, so any different version is a newer one.
+fn replaces_staged(staged: Option<&str>, found: &str) -> bool {
+    staged != Some(found)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::emit_progress;
+    use super::{emit_progress, replaces_staged};
+
+    #[test]
+    fn a_newer_release_replaces_the_one_that_is_waiting() {
+        assert!(replaces_staged(Some("0.1.3"), "0.1.4"));
+        assert!(replaces_staged(None, "0.1.4"));
+    }
+
+    #[test]
+    fn the_release_that_is_already_waiting_is_not_downloaded_again() {
+        assert!(!replaces_staged(Some("0.1.4"), "0.1.4"));
+    }
 
     #[test]
     fn progress_is_reported_in_steps_and_always_at_the_end() {
