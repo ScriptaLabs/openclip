@@ -189,7 +189,7 @@ mod tests {
         // The adapter claims 1s (whole-second GSI clock); the observation clock says 63.4s.
         let mut kill = event(match_id, None, GameEventType::Kill);
         kill.match_offset_ms = Some(1_000);
-        assert!(engine.ingest(vec![kill], 63_400).is_empty());
+        assert_eq!(engine.ingest(vec![kill], 63_400), Vec::new());
         assert_eq!(engine.next_deadline_ms(), Some(68_400));
 
         let job = engine.expire(68_400).expect("expired moment");

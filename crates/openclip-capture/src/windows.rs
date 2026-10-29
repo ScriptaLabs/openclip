@@ -932,11 +932,14 @@ fn next_mixed_audio_chunk(
 }
 
 fn mix_pcm_s16(left: &[u8], right: &[u8]) -> Vec<u8> {
-    left.chunks_exact(2)
-        .zip(right.chunks_exact(2))
+    // Whole 16-bit samples only; a trailing odd byte is dropped, as `chunks_exact` did.
+    left.as_chunks::<2>()
+        .0
+        .iter()
+        .zip(right.as_chunks::<2>().0)
         .flat_map(|(left, right)| {
-            let left = i16::from_le_bytes([left[0], left[1]]);
-            let right = i16::from_le_bytes([right[0], right[1]]);
+            let left = i16::from_le_bytes(*left);
+            let right = i16::from_le_bytes(*right);
             let mixed = i32::from(left)
                 .saturating_add(i32::from(right))
                 .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
@@ -1004,9 +1007,12 @@ mod tests {
             .into_iter()
             .flat_map(i16::to_le_bytes)
             .collect::<Vec<_>>();
-        let mixed = mix_pcm_s16(&left, &right)
-            .chunks_exact(2)
-            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+        let mixed_bytes = mix_pcm_s16(&left, &right);
+        let mixed = mixed_bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|sample| i16::from_le_bytes(*sample))
             .collect::<Vec<_>>();
         assert_eq!(mixed, [3_000, i16::MAX, i16::MIN]);
     }

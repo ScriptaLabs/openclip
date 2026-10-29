@@ -27,14 +27,11 @@ fn representative_sequence_emits_lifecycle_and_non_duplicate_kills() {
     let mut adapter = Cs2Adapter::default();
     let inactive = adapter.process(INACTIVE).expect("inactive payload parses");
     assert_eq!(inactive.sessions.len(), 1);
-    assert!(inactive.matches.is_empty());
+    assert_eq!(inactive.matches, Vec::new());
 
-    assert!(
-        adapter
-            .process(WARMUP)
-            .expect("warmup parses")
-            .matches
-            .is_empty()
+    assert_eq!(
+        adapter.process(WARMUP).expect("warmup parses").matches,
+        Vec::new()
     );
     let started = adapter.process(ROUND_LIVE).expect("live round parses");
     assert_eq!(count(&started, GameEventType::MatchStart), 1);
@@ -87,7 +84,10 @@ fn missing_stats_do_not_erase_the_kill_baseline() {
     let mut adapter = Cs2Adapter::default();
     adapter.process(ROUND_LIVE).expect("live");
     adapter.process(KILL_1).expect("first kill");
-    assert!(adapter.process(PARTIAL).expect("partial").events.is_empty());
+    assert_eq!(
+        adapter.process(PARTIAL).expect("partial").events,
+        Vec::new()
+    );
     assert_eq!(
         count(
             &adapter.process(KILL_2).expect("second kill"),
@@ -124,12 +124,9 @@ fn map_change_finishes_one_match_and_starts_another() {
 fn malformed_payload_returns_an_error_and_partial_payload_is_safe() {
     let mut adapter = Cs2Adapter::default();
     assert!(adapter.process(MALFORMED).is_err());
-    assert!(
-        adapter
-            .process(PARTIAL)
-            .expect("partial parses")
-            .matches
-            .is_empty()
+    assert_eq!(
+        adapter.process(PARTIAL).expect("partial parses").matches,
+        Vec::new()
     );
 }
 
