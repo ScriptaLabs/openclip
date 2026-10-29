@@ -51,6 +51,11 @@ export interface RecordingSettings {
   showClipNotifications: boolean;
   manualReplayShortcut: string;
   watermarkEnabled: boolean;
+  overlayPosition: "top_left" | "top_right";
+  overlayClipPreview: boolean;
+  soundsEnabled: boolean;
+  /** 0 to 100 */
+  soundVolume: number;
 }
 
 export interface AudioDevice {
@@ -162,6 +167,10 @@ const browserSettings: RecordingSettings = {
   showClipNotifications: true,
   manualReplayShortcut: "F8",
   watermarkEnabled: false,
+  overlayPosition: "top_left",
+  overlayClipPreview: true,
+  soundsEnabled: true,
+  soundVolume: 60,
 };
 
 export async function getSettings(): Promise<RecordingSettings> {
@@ -170,6 +179,10 @@ export async function getSettings(): Promise<RecordingSettings> {
 
 export async function updateSettings(settings: RecordingSettings): Promise<void> {
   if (isTauri()) await invoke("update_settings", { settings });
+}
+
+export async function previewOverlay(status: "captured" | "partial" | "failed"): Promise<void> {
+  if (isTauri()) await invoke("preview_overlay", { status });
 }
 
 export async function getMicrophoneDevices(): Promise<AudioDevice[]> {

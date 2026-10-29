@@ -28,6 +28,16 @@ pub enum AccentPreference {
     Neutral,
 }
 
+/// Corner for the post-capture overlay. Bottom corners are deliberately unavailable because they
+/// cover CS2's health, armor and ammo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayPosition {
+    #[default]
+    TopLeft,
+    TopRight,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 // Independent capture choices are intentionally represented as toggles in settings and in the UI.
@@ -55,6 +65,15 @@ pub struct Settings {
     pub manual_replay_shortcut: String,
     #[serde(default)]
     pub watermark_enabled: bool,
+    #[serde(default)]
+    pub overlay_position: OverlayPosition,
+    #[serde(default = "default_true")]
+    pub overlay_clip_preview: bool,
+    #[serde(default = "default_true")]
+    pub sounds_enabled: bool,
+    /// Notification sound loudness, 0 to 100.
+    #[serde(default = "default_sound_volume")]
+    pub sound_volume: u8,
 }
 
 impl Default for Settings {
@@ -77,12 +96,20 @@ impl Default for Settings {
             show_clip_notifications: true,
             manual_replay_shortcut: default_manual_replay_shortcut(),
             watermark_enabled: false,
+            overlay_position: OverlayPosition::TopLeft,
+            overlay_clip_preview: true,
+            sounds_enabled: true,
+            sound_volume: default_sound_volume(),
         }
     }
 }
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_sound_volume() -> u8 {
+    60
 }
 
 fn default_manual_replay_shortcut() -> String {
@@ -116,5 +143,9 @@ mod tests {
         assert_eq!(settings.microphone_device_id, None);
         assert_eq!(settings.manual_replay_shortcut, "F8");
         assert!(!settings.watermark_enabled);
+        assert_eq!(settings.overlay_position, super::OverlayPosition::TopLeft);
+        assert!(settings.overlay_clip_preview);
+        assert!(settings.sounds_enabled);
+        assert_eq!(settings.sound_volume, 60);
     }
 }

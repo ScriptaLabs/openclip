@@ -7,7 +7,7 @@ use openclip_buffer::{CaptureJob, MomentEngine};
 use openclip_capture::RecorderService;
 use openclip_core::{GameStateUpdate, MatchRepository, Moment, Settings};
 use openclip_storage::SqliteRepository;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +22,7 @@ pub(crate) struct AutomaticMomentResult {
 }
 
 /// What the user can rely on after a moment closes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CaptureStatus {
     /// The full requested window was saved.

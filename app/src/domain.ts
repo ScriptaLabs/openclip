@@ -117,3 +117,35 @@ export function momentTitle(moment: Pick<Moment, "classification" | "events">): 
       : eventFlag(kill, "headshot") ? "Headshot" : base;
   return [...traits, finish].join(" · ");
 }
+
+const weaponLabels: Record<string, string> = {
+  ak47: "AK-47", m4a1: "M4A4", m4a1_silencer: "M4A1-S", awp: "AWP", aug: "AUG", sg556: "SG 553",
+  famas: "FAMAS", galilar: "Galil AR", ssg08: "SSG 08", scar20: "SCAR-20", g3sg1: "G3SG1",
+  deagle: "Desert Eagle", usp_silencer: "USP-S", hkp2000: "P2000", glock: "Glock-18", p250: "P250",
+  fiveseven: "Five-SeveN", tec9: "Tec-9", cz75a: "CZ75-Auto", elite: "Dual Berettas", revolver: "R8 Revolver",
+  mp9: "MP9", mac10: "MAC-10", mp7: "MP7", mp5sd: "MP5-SD", ump45: "UMP-45", p90: "P90", bizon: "PP-Bizon",
+  nova: "Nova", xm1014: "XM1014", mag7: "MAG-7", sawedoff: "Sawed-Off", m249: "M249", negev: "Negev",
+  taser: "Zeus x27", hegrenade: "HE Grenade", inferno: "Incendiary", molotov: "Molotov", knife: "Knife",
+};
+
+export function weaponLabel(raw: string): string {
+  const key = raw.replace(/^weapon_/, "");
+  if (weaponLabels[key]) return weaponLabels[key];
+  if (key.includes("knife") || key.includes("bayonet")) return "Knife";
+  return key.replace(/_/g, " ").toUpperCase();
+}
+
+export function killCount(moment: Pick<Moment, "events">): number {
+  return moment.events.filter((event) => event.eventType === "kill").length;
+}
+
+/** The weapon behind most kills in a moment, as a display label. */
+export function dominantWeapon(moment: Pick<Moment, "events">): string | null {
+  const counts = new Map<string, number>();
+  for (const event of moment.events) {
+    if (event.eventType !== "kill" || typeof event.metadata.weapon !== "string") continue;
+    counts.set(event.metadata.weapon, (counts.get(event.metadata.weapon) ?? 0) + 1);
+  }
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  return top ? weaponLabel(top[0]) : null;
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { FolderOpen } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -6,12 +6,14 @@ import {
   getMicrophoneDevices,
   getSettings,
   installCs2GsiConfig,
+  previewOverlay,
   setStoragePath,
   updateSettings,
   type AudioDevice,
   type Cs2SetupStatus,
   type RecordingSettings,
 } from "../data/matchRepository";
+import { playSound } from "../overlay/sounds";
 
 const displayStoragePath = (path?: string) => {
   if (!path) return "Loading…";
@@ -41,6 +43,13 @@ export function SettingsPage() {
   const save = (next: RecordingSettings) => {
     setSettings(next);
     void updateSettings(next).catch((error) => setSetupError(String(error)));
+  };
+
+  // The slider only moves local state while dragging; the value is stored (and heard) on release.
+  const commitVolume = (audible: boolean) => {
+    if (!settings) return;
+    void updateSettings(settings).catch((error) => setSetupError(String(error)));
+    if (audible) playSound("captured", settings.soundVolume);
   };
 
   const install = async () => {
@@ -158,10 +167,54 @@ export function SettingsPage() {
           <label><span>Accent</span><select disabled={!settings} value={settings?.accent ?? "mint"} onChange={(event) => settings && save({ ...settings, accent: event.target.value as RecordingSettings["accent"] })}><option value="mint">Mint</option><option value="blue">Blue</option><option value="purple">Purple</option><option value="neutral">Neutral</option></select></label>
         </div>
         <div className="toggle-list recording-toggles">
-          <label className="toggle-row"><span><strong>Clip captured notification</strong><small>Show a restrained in-app confirmation after automatic capture</small></span><input disabled={!settings} type="checkbox" checked={settings?.showClipNotifications ?? true} onChange={(event) => settings && save({ ...settings, showClipNotifications: event.target.checked })} /><i /></label>
           <label className="toggle-row"><span><strong>Animated export watermark</strong><small>Optional OpenClip mark in the top-right of exported clips</small></span><input disabled={!settings} type="checkbox" checked={settings?.watermarkEnabled ?? false} onChange={(event) => settings && save({ ...settings, watermarkEnabled: event.target.checked })} /><i /></label>
         </div>
       </section>
+
+      <section className="settings-panel">
+        <div className="settings-heading"><h2>Capture overlay</h2><p>Confirms each moment after it is saved, so it is never part of the footage. Works over borderless and windowed CS2, not exclusive fullscreen.</p></div>
+        <div className="toggle-list recording-toggles">
+          <label className="toggle-row"><span><strong>Show capture overlay</strong><small>Tells you whether a kill, multi-kill or ace was captured</small></span><input disabled={!settings} type="checkbox" checked={settings?.showClipNotifications ?? true} onChange={(event) => settings && save({ ...settings, showClipNotifications: event.target.checked })} /><i /></label>
+          <label className="toggle-row"><span><strong>Clip preview</strong><small>Plays the last few seconds of the saved clip under the confirmation</small></span><input disabled={!settings || !settings.showClipNotifications} type="checkbox" checked={settings?.overlayClipPreview ?? true} onChange={(event) => settings && save({ ...settings, overlayClipPreview: event.target.checked })} /><i /></label>
+        </div>
+        <div className="settings-grid compact-settings overlay-position">
+          <label><span>Position</span><select disabled={!settings || !settings.showClipNotifications} value={settings?.overlayPosition ?? "top_left"} onChange={(event) => settings && save({ ...settings, overlayPosition: event.target.value as RecordingSettings["overlayPosition"] })}><option value="top_left">Top left</option><option value="top_right">Top right</option></select></label>
+        </div>
+        <small className="settings-help">Bottom corners are not offered because they cover your health, armor and ammo.</small>
+        <div className="overlay-test">
+          <span>Test overlay</span>
+          <button className="secondary-button" disabled={!settings} onClick={() => void previewOverlay("captured")} type="button">Captured</button>
+          <button className="secondary-button" disabled={!settings} onClick={() => void previewOverlay("partial")} type="button">Partial</button>
+          <button className="secondary-button" disabled={!settings} onClick={() => void previewOverlay("failed")} type="button">Failed</button>
+        </div>
+      </section>
+
+      <section className="settings-panel">
+        <div className="settings-heading"><h2>Sounds</h2><p>Plays with the capture overlay when a moment is saved or missed.</p></div>
+        <div className="toggle-list recording-toggles">
+          <label className="toggle-row"><span><strong>Notification sounds</strong><small>Turn off to keep OpenClip completely silent</small></span><input disabled={!settings} type="checkbox" checked={settings?.soundsEnabled ?? true} onChange={(event) => settings && save({ ...settings, soundsEnabled: event.target.checked })} /><i /></label>
+        </div>
+        <div className="volume-setting" data-disabled={!settings?.soundsEnabled}>
+          <label>
+            <span>Volume</span>
+            <input
+              aria-label="Notification volume"
+              disabled={!settings || !settings.soundsEnabled}
+              max={100}
+              min={0}
+              onBlur={() => commitVolume(false)}
+              onChange={(event) => settings && setSettings({ ...settings, soundVolume: Number(event.target.value) })}
+              onKeyUp={(event) => { if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") commitVolume(true); }}
+              onPointerUp={() => commitVolume(true)}
+              step={5}
+              style={{ "--fill": `${settings?.soundVolume ?? 60}%` } as CSSProperties}
+              type="range"
+              value={settings?.soundVolume ?? 60}
+            />
+            <output>{settings?.soundVolume ?? 60}%</output>
+          </label>
+          <button className="secondary-button" disabled={!settings || !settings.soundsEnabled} onClick={() => settings && playSound("captured", settings.soundVolume)} type="button">Test sound</button>
+        </div></section>
     </div>
   );
 }

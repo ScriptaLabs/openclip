@@ -92,3 +92,16 @@ clips.
 - Five Kill is intentionally conservative; true Ace detection needs stronger round/opponent proof.
 - Automatic moments require GSI and capture clocks to be active in the same desktop process.
 - Export copies separate clips; montage rendering remains deferred.
+
+## Capture overlay
+
+After a moment is finalized and saved, `overlay.rs` shows a separate transparent, click-through,
+non-focusable window in the top-left (or top-right) of the primary monitor. It is hidden whenever
+nothing is on screen and never appears before the moment's post-roll has been recorded. It shows
+the logo, the moment, and `captured` / `partial` / `failed`, optionally followed by a muted 2-3
+second preview of the saved clip, then fades out. Sounds (`assets/sfx`) play with it; volume and an
+on/off switch are in Settings. The window is granted read access to exactly the one clip it
+previews. Overlays cannot draw over exclusive fullscreen; CS2 must run borderless or windowed.
+
+`npm run dev` with `?overlay=captured|partial|failed` (optionally `&clip=<url>&side=right`)
+previews the overlay in a browser.

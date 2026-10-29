@@ -2,6 +2,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod automatic;
+mod overlay;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,6 +41,42 @@ struct Cs2SetupStatus {
     configured: bool,
     install: Option<Cs2Install>,
     message: String,
+}
+
+/// Settings "Test overlay": shows a synthetic quad kill, previewing the newest saved clip.
+#[tauri::command]
+fn preview_overlay(
+    status: automatic::CaptureStatus,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (mut settings, newest_clip) = {
+        let repository = state
+            .repository
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_owned())?;
+        let settings = repository
+            .load_settings()
+            .map_err(|error| error.to_string())?;
+        let newest_clip = repository
+            .list_clips()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|clip| clip.path.is_file())
+            .max_by_key(|clip| clip.created_at)
+            .map(|clip| clip.path);
+        (settings, newest_clip)
+    };
+    // The button is a test of the overlay itself, so it ignores the on/off switch.
+    settings.show_clip_notifications = true;
+    overlay::present(&app, &settings, &overlay::demo_result(status, newest_clip));
+    Ok(())
+}
+
+/// Called by the overlay window once its last notification has animated out.
+#[tauri::command]
+fn hide_overlay(app: tauri::AppHandle) {
+    overlay::hide(&app);
 }
 
 #[tauri::command]
@@ -168,6 +205,7 @@ fn update_settings(
 ) -> Result<(), String> {
     let manual_replay_shortcut = settings.manual_replay_shortcut.trim().to_owned();
     settings.manual_replay_shortcut = manual_replay_shortcut;
+    settings.sound_volume = settings.sound_volume.min(100);
     if settings.manual_replay_shortcut.is_empty() {
         return Err("choose a manual replay shortcut".to_owned());
     }
@@ -646,11 +684,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let app_handle = app.handle().clone();
     let notification_app = app.handle().clone();
+    let notification_repository = repository.clone();
     let notify = Arc::new(move |result: AutomaticMomentResult| {
+        let overlay_settings = notification_repository
+            .lock()
+            .ok()
+            .and_then(|repository| repository.load_settings().ok());
+        if let Some(settings) = overlay_settings {
+            overlay::present(&notification_app, &settings, &result);
+        }
         if let Err(error) = notification_app.emit("automatic_moment_finalized", result) {
             tracing::warn!(%error, "could not emit automatic moment result");
         }
     });
+    overlay::create(app.handle());
     let automatic = AutomaticMomentService::start(
         repository.clone(),
         recorder.clone(),
@@ -726,6 +773,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
+            hide_overlay,
+            preview_overlay,
             get_recording_status,
             save_replay,
             get_clips,

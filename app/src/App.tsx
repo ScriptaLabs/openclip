@@ -2,8 +2,7 @@ import { useEffect, useState } from "react";
 import { Film } from "lucide-react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { MatchRecord, Moment } from "./domain";
-import { momentTitle } from "./domain";
+import type { MatchRecord } from "./domain";
 import {
   getCs2Status,
   getRecordingStatus,
@@ -25,7 +24,6 @@ function App() {
   const [status, setStatus] = useState<Cs2Status | null>(null);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [clipNotice, setClipNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -57,15 +55,8 @@ function App() {
     const unlisten: Array<() => void> = [];
     if (isTauri()) {
       void listen("gsi_update", () => void refresh()).then((stop) => { unlisten.push(stop); });
-      void listen<{ moment: Pick<Moment, "classification" | "events">; captured: boolean }>("automatic_moment_finalized", async (event) => {
-        await refresh();
-        const settings = await getSettings();
-        if (event.payload.captured && settings.showClipNotifications) {
-          const label = momentTitle(event.payload.moment);
-          setClipNotice(`Clip captured · ${label}`);
-          window.setTimeout(() => setClipNotice(null), 4_000);
-        }
-      }).then((stop) => { unlisten.push(stop); });
+      // The capture confirmation itself is shown by the overlay window, not in this window.
+      void listen("automatic_moment_finalized", () => void refresh()).then((stop) => { unlisten.push(stop); });
     }
     return () => {
       active = false;
@@ -115,7 +106,6 @@ function App() {
           {content}
         </div>
       </main>
-      {clipNotice && <div className="clip-notice" role="status">{clipNotice}</div>}
     </div>
   );
 }

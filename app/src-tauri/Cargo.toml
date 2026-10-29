@@ -17,8 +17,10 @@ openclip-buffer = { path = "../../crates/openclip-buffer" }
 openclip-capture = { path = "../../crates/openclip-capture" }
 openclip-cs2 = { path = "../../crates/openclip-cs2" }
 openclip-storage = { path = "../../crates/openclip-storage" }
+chrono.workspace = true
 serde.workspace = true
-tauri = { version = "2", features = [] }
+serde_json.workspace = true
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
