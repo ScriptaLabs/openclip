@@ -74,6 +74,12 @@ pub struct Settings {
     /// Notification sound loudness, 0 to 100.
     #[serde(default = "default_sound_volume")]
     pub sound_volume: u8,
+    /// Download and install new versions in the background.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// Closing the window keeps `OpenClip` recording from the tray.
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
 }
 
 impl Default for Settings {
@@ -100,6 +106,8 @@ impl Default for Settings {
             overlay_clip_preview: true,
             sounds_enabled: true,
             sound_volume: default_sound_volume(),
+            auto_update: true,
+            close_to_tray: true,
         }
     }
 }
@@ -147,5 +155,7 @@ mod tests {
         assert!(settings.overlay_clip_preview);
         assert!(settings.sounds_enabled);
         assert_eq!(settings.sound_volume, 60);
+        assert!(settings.auto_update);
+        assert!(settings.close_to_tray);
     }
 }

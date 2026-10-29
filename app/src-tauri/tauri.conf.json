@@ -20,7 +20,8 @@
         "resizable": true,
         "fullscreen": false,
         "center": true,
-        "backgroundColor": "#090a0c"
+        "backgroundColor": "#090a0c",
+        "visible": false
       }
     ],
     "security": {
@@ -33,6 +34,12 @@
   },
   "bundle": {
     "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": true,
+    "publisher": "OpenClip",
+    "shortDescription": "Automatic game clipping",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -43,6 +50,30 @@
     "resources": {
       "../assets/branding/watermark.mov": "assets/branding/watermark.mov",
       "../../dependencies/ffmpeg/ffmpeg.exe": "bin/ffmpeg.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerHooks": "installer/hooks.nsh",
+        "displayLanguageSelector": false,
+        "startMenuFolder": "OpenClip",
+        "compression": "lzma"
+      }
+    }
+  },
+  "mainBinaryName": "OpenClip",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4MzMwREM5NTczNkEwQkIKUldTN29EWlh5UTB6NkhJb2NRc3FBa2xsSmpGdkc2K0JMQ2JmV21pclNrMEtzS0VTbDNvT0I1SWgK",
+      "endpoints": [
+        "https://github.com/ScriptaLabs/openclip/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "quiet"
+      }
     }
   }
 }

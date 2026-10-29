@@ -1,0 +1,149 @@
+name: Release
+
+# Push a tag like v1.2.0 to ship it:
+#   git tag v1.2.0 && git push origin v1.2.0
+# Tags with a suffix (v1.2.0-beta.1) build and publish a GitHub pre-release only. They never reach
+# the update channel, so nobody is updated to them automatically.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: checks
+    runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # Baked into the app so it can listen for releases. Public by design (anon key, read-only).
+      OPENCLIP_REALTIME_URL: ${{ secrets.SUPABASE_SUBSCRIBE }}
+      OPENCLIP_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      OPENCLIP_DOWNLOAD_BASE: ${{ vars.B2_PUBLIC_BASE_URL }}/openclip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      # The bundled ffmpeg.exe lives in Git LFS. Cache it so releases do not eat the LFS bandwidth quota.
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: lfs-${{ hashFiles('.gitattributes') }}-${{ hashFiles('dependencies/ffmpeg/*') }}
+
+      - name: Fetch LFS files
+        shell: bash
+        run: git lfs pull
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then echo "stable=false" >> "$GITHUB_OUTPUT"; else echo "stable=true" >> "$GITHUB_OUTPUT"; fi
+          PREVIOUS="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$PREVIOUS" ]; then RANGE="$PREVIOUS..HEAD"; else RANGE="HEAD"; fi
+          {
+            echo "notes<<NOTES_EOF"
+            git log --no-merges --pretty=format:'- %s' "$RANGE" | head -40
+            echo
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stamp the version
+        shell: bash
+        run: |
+          node scripts/release/set-version.mjs "${{ steps.version.outputs.version }}"
+          node scripts/release/configure.mjs
+
+      - name: Build and sign the installer
+        shell: bash
+        working-directory: app
+        run: |
+          npm ci
+          npx tauri build
+
+      - name: Prepare release files
+        shell: bash
+        env:
+          RELEASE_NOTES: ${{ steps.version.outputs.notes }}
+        run: |
+          node scripts/release/make-manifest.mjs \
+            --version "${{ steps.version.outputs.version }}" \
+            --out dist-release \
+            --mirror-base "${OPENCLIP_DOWNLOAD_BASE}" \
+            --github-base "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+
+      - name: Publish to Backblaze
+        if: steps.version.outputs.stable == 'true'
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.BACKBLAZE_KEYID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKBLAZE_APPKEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          # Backblaze's S3 API rejects the integrity headers newer AWS CLIs add by default.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          B2_ENDPOINT: ${{ vars.B2_ENDPOINT }}
+          B2_BUCKET: ${{ vars.B2_BUCKET }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          INSTALLER="$(ls dist-release/*-setup.exe | head -1)"
+          # The installer never changes once published, so it can be cached for a long time.
+          aws s3 cp "$INSTALLER" "s3://${B2_BUCKET}/openclip/releases/v${VERSION}/$(basename "$INSTALLER")" \
+            --endpoint-url "$B2_ENDPOINT" --cache-control "public, max-age=31536000, immutable"
+          # The manifest is what clients poll, so it must refresh quickly.
+          aws s3 cp dist-release/latest.json "s3://${B2_BUCKET}/openclip/latest.json" \
+            --endpoint-url "$B2_ENDPOINT" --cache-control "public, max-age=30" --content-type application/json
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenClip ${{ steps.version.outputs.version }}
+          body: ${{ steps.version.outputs.notes }}
+          prerelease: ${{ steps.version.outputs.stable != 'true' }}
+          files: |
+            dist-release/*-setup.exe
+          fail_on_unmatched_files: true
+
+      # The updater reads releases/latest/download/latest.json, so the asset must carry that exact name.
+      - name: Attach the GitHub manifest
+        if: steps.version.outputs.stable == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist-release/github
+          cp dist-release/latest.github.json dist-release/github/latest.json
+          gh release upload "${{ github.ref_name }}" dist-release/github/latest.json --clobber
+
+      # Last on purpose: announce only what can already be downloaded.
+      - name: Announce on the update channel
+        if: steps.version.outputs.stable == 'true'
+        shell: bash
+        env:
+          SUPABASE_WRITE_KEY: ${{ secrets.SUPABASE_WRITE_KEY }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SUBSCRIBE: ${{ secrets.SUPABASE_SUBSCRIBE }}
+        run: node scripts/release/publish-supabase.mjs dist-release/update-row.json

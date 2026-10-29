@@ -13,6 +13,7 @@ import {
   type Cs2SetupStatus,
   type RecordingSettings,
 } from "../data/matchRepository";
+import { checkForUpdate, getLaunchAtStartup, installUpdateNow, setLaunchAtStartup, useUpdateStatus, type UpdateStatus } from "../data/updates";
 import { weaponIcon } from "../lib/weapons";
 import { playSound } from "../overlay/sounds";
 import mirage from "../../assets/map_splash/mirage.jpg";
@@ -71,9 +72,25 @@ const SECTIONS = [
   { id: "overlay", label: "Overlay and sounds" },
   { id: "storage", label: "Storage" },
   { id: "shortcuts", label: "Shortcuts" },
+  { id: "startup", label: "Startup and updates" },
   { id: "game", label: "Counter-Strike 2" },
   { id: "appearance", label: "Appearance" },
 ] as const;
+
+function updateSummary(status: UpdateStatus): string {
+  if (status.error) return `Couldn’t check for updates: ${status.error}`;
+  switch (status.phase) {
+    case "checking": return "Checking for updates…";
+    case "downloading": return `Downloading v${status.availableVersion}…`;
+    case "ready": return `v${status.availableVersion} is ready. It installs when your match ends.`;
+    case "available": return `v${status.availableVersion} is available.`;
+    case "installing": return "Restarting to finish the update…";
+    default:
+      return status.lastChecked
+        ? `You’re up to date. Last checked ${new Date(status.lastChecked).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}.`
+        : "OpenClip checks for updates automatically.";
+  }
+}
 
 export function SettingsPage() {
   const [setup, setSetup] = useState<Cs2SetupStatus | null>(null);
@@ -83,12 +100,15 @@ export function SettingsPage() {
   const [microphones, setMicrophones] = useState<AudioDevice[]>([]);
   const [listening, setListening] = useState(false);
   const [active, setActive] = useState<string>(SECTIONS[0].id);
+  const [launchAtStartup, setLaunchAtStartupState] = useState<boolean | null>(null);
+  const update = useUpdateStatus();
   const refs = useRef(new Map<string, HTMLElement>());
 
   const refreshSetup = () => getCs2SetupStatus().then(setSetup).catch((failure) => setError(String(failure)));
   useEffect(() => {
     void refreshSetup();
     void getSettings().then(setSettings).catch((failure) => setError(String(failure)));
+    void getLaunchAtStartup().then(setLaunchAtStartupState).catch(() => setLaunchAtStartupState(false));
     void getMicrophoneDevices().then(setMicrophones).catch((failure) => setError(String(failure)));
   }, []);
 
@@ -325,6 +345,37 @@ export function SettingsPage() {
               <div className="oc-path">
                 <kbd className={`oc-key ${listening ? "listening" : ""}`}>{listening ? "Press keys…" : s?.manualReplayShortcut ?? "F8"}</kbd>
                 <button className="oc-btn" disabled={!s} onClick={() => setListening((value) => !value)} type="button">{listening ? "Cancel" : "Change"}</button>
+              </div>
+            </Setting>
+          </section>
+
+          <section className="oc-card oc-section" id="startup" ref={(node) => { if (node) refs.current.set("startup", node); }}>
+            <h2>Startup and updates</h2>
+            <p>OpenClip only records while it is running, so it can start with Windows and stay out of your way in the tray.</p>
+            <Setting label="Launch with Windows" help="Starts quietly in the tray when you sign in.">
+              <Switch
+                checked={launchAtStartup ?? false}
+                disabled={launchAtStartup === null}
+                label="Launch with Windows"
+                onChange={(enabled) => {
+                  setLaunchAtStartupState(enabled);
+                  setLaunchAtStartup(enabled).catch((failure) => {
+                    setLaunchAtStartupState(!enabled);
+                    setError(failure instanceof Error ? failure.message : String(failure));
+                  });
+                }}
+              />
+            </Setting>
+            <Setting label="Keep recording when closed" help="Closing the window sends OpenClip to the tray. Quit from the tray icon.">
+              <Switch checked={s?.closeToTray ?? true} disabled={!s} label="Keep recording when closed" onChange={(closeToTray) => s && save({ ...s, closeToTray })} />
+            </Setting>
+            <Setting label="Automatic updates" help="New versions download in the background and install between matches, never during one.">
+              <Switch checked={s?.autoUpdate ?? true} disabled={!s} label="Automatic updates" onChange={(autoUpdate) => s && save({ ...s, autoUpdate })} />
+            </Setting>
+            <Setting label={`Version ${update.currentVersion}`} help={updateSummary(update)}>
+              <div className="oc-path">
+                {update.phase === "ready" && <button className="oc-btn primary" onClick={() => void installUpdateNow()} type="button">Restart to update</button>}
+                <button className="oc-btn" disabled={["checking", "downloading", "installing"].includes(update.phase)} onClick={() => void checkForUpdate()} type="button">Check for updates</button>
               </div>
             </Setting>
           </section>

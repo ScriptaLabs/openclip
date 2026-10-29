@@ -1,6 +1,7 @@
 import { Clapperboard, Gamepad2, LayoutDashboard, LayoutGrid, SlidersHorizontal, type LucideIcon } from "lucide-react";
 import type { Cs2Status, RecordingStatus } from "../data/matchRepository";
 import logo from "../../assets/branding/logo.png";
+import { UpdateIndicator, VersionLabel } from "./UpdateIndicator";
 
 export type Page = "overview" | "clips" | "matches" | "montages" | "settings";
 
@@ -59,6 +60,7 @@ export function Sidebar({ currentPage, onNavigate, status, recordingStatus, clip
       </nav>
       <div className="oc-grow" />
       {item("settings", "Settings", SlidersHorizontal)}
+      <UpdateIndicator />
       <div className={`oc-status ${state.tone}`}>
         <i />
         <div>
@@ -66,6 +68,7 @@ export function Sidebar({ currentPage, onNavigate, status, recordingStatus, clip
           <span>{state.detail}</span>
         </div>
       </div>
+      <VersionLabel />
     </aside>
   );
 }

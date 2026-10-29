@@ -56,6 +56,8 @@ export interface RecordingSettings {
   soundsEnabled: boolean;
   /** 0 to 100 */
   soundVolume: number;
+  autoUpdate: boolean;
+  closeToTray: boolean;
 }
 
 export interface AudioDevice {
@@ -171,6 +173,8 @@ const browserSettings: RecordingSettings = {
   overlayClipPreview: true,
   soundsEnabled: true,
   soundVolume: 60,
+  autoUpdate: true,
+  closeToTray: true,
 };
 
 export async function getSettings(): Promise<RecordingSettings> {

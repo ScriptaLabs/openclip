@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "OpenClip"
+path = "src/main.rs"
+
 [lib]
 name = "openclip_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -20,7 +24,14 @@ openclip-storage = { path = "../../crates/openclip-storage" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tokio.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"

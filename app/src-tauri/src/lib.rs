@@ -3,6 +3,8 @@
 
 mod automatic;
 mod overlay;
+mod realtime;
+mod updater;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,8 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use openclip_capture::{AudioDevice, RecorderService, list_microphone_devices};
 use openclip_core::{
-    Clip, GameEventType, GameStateUpdate, Match, MatchId, MatchRepository, Moment, RecordingStatus,
-    Settings,
+    Clip, GameEventType, GameStateUpdate, Match, MatchId, MatchRepository, Moment, RecordingState,
+    RecordingStatus, Settings,
 };
 use openclip_cs2::{
     ConfigInstallResult, Cs2Install, Cs2Status, GSI_CONFIG_FILE_NAME, GsiEndpoint, GsiService,
@@ -19,7 +21,10 @@ use openclip_cs2::{
 };
 use openclip_storage::SqliteRepository;
 use serde::Serialize;
-use tauri::{Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, State, WindowEvent};
+use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
@@ -32,6 +37,7 @@ struct AppState {
     gsi: SharedService,
     recorder: RecorderService,
     automatic: AutomaticMomentService,
+    updates: updater::UpdateService,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +47,166 @@ struct Cs2SetupStatus {
     configured: bool,
     install: Option<Cs2Install>,
     message: String,
+}
+
+/// CS2 sends a heartbeat every few seconds; a long silence means the game closed or crashed, so
+/// the match is finished instead of staying open forever.
+fn spawn_idle_match_watcher(gsi: &SharedService) -> std::io::Result<()> {
+    let idle_gsi = gsi.clone();
+    std::thread::Builder::new()
+        .name("openclip-gsi-idle".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                if let Err(error) = idle_gsi.close_idle_match(chrono::Duration::seconds(60)) {
+                    tracing::warn!(%error, "could not close an idle match");
+                }
+            }
+        })
+        .map(|_| ())
+}
+
+/// Starts the background updater and, when a release channel is configured, its push listener.
+fn start_updates(
+    app: &tauri::AppHandle,
+    repository: &Arc<Mutex<SqliteRepository>>,
+    gsi: &SharedService,
+    recorder: &RecorderService,
+) -> updater::UpdateService {
+    let settings_repository = repository.clone();
+    let status_gsi = gsi.clone();
+    let status_recorder = recorder.clone();
+    let policy = updater::Policy {
+        auto_update: Box::new(move || {
+            settings_repository
+                .lock()
+                .ok()
+                .and_then(|repository| repository.load_settings().ok())
+                .is_none_or(|settings| settings.auto_update)
+        }),
+        safe_to_install: Box::new(move || {
+            status_gsi.status().state != openclip_cs2::Cs2ConnectionState::MatchInProgress
+                && status_recorder.status().state != RecordingState::SavingReplay
+        }),
+    };
+    let updates = updater::UpdateService::new(app.clone(), policy);
+
+    let (nudge, nudges) = tokio::sync::mpsc::unbounded_channel();
+    tauri::async_runtime::spawn(updates.clone().run(nudges));
+    if let Some(url) = release_channel_url() {
+        tauri::async_runtime::spawn(realtime::watch(url, nudge));
+    } else {
+        tracing::info!("no release channel configured; updates are checked on a timer");
+    }
+    updates
+}
+
+/// Launched by Windows at sign-in (`--background`): stay in the tray instead of opening a window.
+fn show_window_unless_background(app: &tauri::App) {
+    if std::env::args().any(|argument| argument == "--background") {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn close_to_tray_enabled(app: &tauri::AppHandle) -> bool {
+    app.state::<AppState>()
+        .repository
+        .lock()
+        .ok()
+        .and_then(|repository| repository.load_settings().ok())
+        .is_none_or(|settings| settings.close_to_tray)
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open OpenClip", true, None::<&str>)?;
+    let check = MenuItem::with_id(app, "check", "Check for updates", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit OpenClip", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &check, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("OpenClip")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "check" => {
+                let updates = app.state::<AppState>().updates.clone();
+                tauri::async_runtime::spawn(async move { updates.check(true).await });
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+/// The release channel is public by design (an anon key behind row level security) and is baked
+/// into the build by CI. Anything installed from it must still carry a valid updater signature.
+fn release_channel_url() -> Option<url::Url> {
+    option_env!("OPENCLIP_REALTIME_URL").and_then(|configured| {
+        realtime::websocket_url(configured, option_env!("OPENCLIP_SUPABASE_ANON_KEY"))
+    })
+}
+
+#[tauri::command]
+fn get_update_status(state: State<'_, AppState>) -> updater::UpdateStatus {
+    state.updates.status()
+}
+
+#[tauri::command]
+async fn check_for_update(state: State<'_, AppState>) -> Result<updater::UpdateStatus, String> {
+    let updates = state.updates.clone();
+    updates.check(true).await;
+    Ok(updates.status())
+}
+
+#[tauri::command]
+async fn update_now(state: State<'_, AppState>) -> Result<(), String> {
+    let updates = state.updates.clone();
+    updates.update_now().await;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_launch_at_startup(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_launch_at_startup(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let launcher = app.autolaunch();
+    if enabled {
+        launcher.enable()
+    } else {
+        launcher.disable()
+    }
+    .map_err(|error| error.to_string())
 }
 
 /// Settings "Test overlay": shows a synthetic quad kill, previewing the newest saved clip.
@@ -816,12 +982,17 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         automatic_observer.observe(update);
     });
     let gsi = Arc::new(GsiService::with_observer(repository.clone(), observer));
+    let updates = start_updates(app.handle(), &repository, &gsi, &recorder);
     app.manage(AppState {
         repository,
         gsi: gsi.clone(),
         recorder: recorder.clone(),
         automatic,
+        updates,
     });
+
+    setup_tray(app)?;
+    show_window_unless_background(app);
 
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
@@ -853,19 +1024,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .start()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
 
-    // CS2 sends a heartbeat every few seconds; a long silence means the game closed or crashed,
-    // so the match is finished instead of staying open forever.
-    let idle_gsi = gsi.clone();
-    std::thread::Builder::new()
-        .name("openclip-gsi-idle".to_owned())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                if let Err(error) = idle_gsi.close_idle_match(chrono::Duration::seconds(60)) {
-                    tracing::warn!(%error, "could not close an idle match");
-                }
-            }
-        })?;
+    spawn_idle_match_watcher(&gsi)?;
 
     let handler: Arc<dyn openclip_cs2::GsiPayloadHandler> = gsi.clone();
     tauri::async_runtime::spawn(async move {
@@ -888,10 +1047,38 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Must be first: a second launch (for example the Start menu while OpenClip is in the
+        // tray) brings the running window forward instead of starting another recorder.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _directory| {
+                show_main_window(app);
+            },
+        ))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("OpenClip")
+                .args(["--background"])
+                .build(),
+        )
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+                && close_to_tray_enabled(window.app_handle())
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
+            get_update_status,
+            check_for_update,
+            update_now,
+            get_launch_at_startup,
+            set_launch_at_startup,
             hide_overlay,
             preview_overlay,
             get_recording_status,

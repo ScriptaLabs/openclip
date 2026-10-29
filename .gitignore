@@ -11,3 +11,10 @@ Thumbs.db
 # Only ffmpeg.exe is shipped by OpenClip; the companion CLI/player are local tooling.
 /dependencies/ffmpeg/ffplay.exe
 /dependencies/ffmpeg/ffprobe.exe
+
+# Secrets and release output. Never commit these.
+.env
+.env.*
+!.env.example
+*.key
+/dist-release/
