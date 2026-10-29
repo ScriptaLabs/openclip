@@ -19,7 +19,7 @@ mod thumbnail;
 mod windows;
 pub use config::{EncoderConfig, encoder_config};
 pub use media::{FinalizedMediaInfo, remux_segments, validate_finalized_segment};
-pub use recorder::RecorderService;
+pub use recorder::{RecorderService, SavedRange};
 #[cfg(windows)]
 pub use thumbnail::{generate_clip_thumbnail, thumbnail_path_for_clip};
 

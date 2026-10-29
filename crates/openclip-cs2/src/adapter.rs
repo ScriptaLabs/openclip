@@ -50,9 +50,26 @@ impl Cs2Adapter {
 
         self.ensure_session(&payload, timestamp, &mut update);
         self.update_match_lifecycle(&payload, timestamp, &mut update);
-        self.update_round_lifecycle(&payload, timestamp, &mut update);
-        self.track_weapon_usage(&payload);
-        self.detect_kills(&payload, timestamp, &mut update);
+
+        // The round-winning (and match-winning) kill routinely arrives in the same payload that
+        // reports the round as over or the map as game over. Attribute it to the round and match
+        // that are still open before closing them, otherwise it is dropped or orphaned from the
+        // multi-kill it completes.
+        let closing_round =
+            payload.round.as_ref().and_then(|round| round.phase) == Some(RoundPhase::Over);
+        let game_over = payload.map.as_ref().and_then(|map| map.phase) == Some(MapPhase::GameOver);
+        if closing_round || game_over {
+            self.track_weapon_usage(&payload);
+            self.detect_kills(&payload, timestamp, &mut update);
+            self.update_round_lifecycle(&payload, timestamp, &mut update);
+            if game_over {
+                self.finish_match(timestamp, &mut update);
+            }
+        } else {
+            self.update_round_lifecycle(&payload, timestamp, &mut update);
+            self.track_weapon_usage(&payload);
+            self.detect_kills(&payload, timestamp, &mut update);
+        }
 
         self.previous = Some(payload);
         update
@@ -106,11 +123,6 @@ impl Cs2Adapter {
 
         if self.active_match.is_none() && is_live {
             self.start_match(payload, timestamp, update);
-        }
-
-        if phase == Some(MapPhase::GameOver) {
-            self.finish_match(timestamp, update);
-            return;
         }
 
         if let (Some(active), Some(map)) = (self.active_match.as_mut(), map) {

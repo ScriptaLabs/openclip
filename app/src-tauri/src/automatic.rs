@@ -1,14 +1,11 @@
-use std::ops::RangeInclusive;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use openclip_buffer::WindowedMomentDetector;
+use openclip_buffer::{CaptureJob, MomentEngine};
 use openclip_capture::RecorderService;
-use openclip_core::{
-    GameEventType, GameStateUpdate, MatchRepository, Moment, MomentDetector, MomentId, Settings,
-};
+use openclip_core::{GameStateUpdate, MatchRepository, Moment, Settings};
 use openclip_storage::SqliteRepository;
 use serde::Serialize;
 
@@ -16,25 +13,29 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AutomaticMomentResult {
     pub moment: Moment,
+    /// True whenever a clip exists, including a partial one.
     pub captured: bool,
+    pub status: CaptureStatus,
+    /// Footage missing from the start of a partial clip.
+    pub missing_ms: u64,
     pub error: Option<String>,
+}
+
+/// What the user can rely on after a moment closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CaptureStatus {
+    /// The full requested window was saved.
+    Captured,
+    /// A clip exists but starts late or skips footage because the buffer did not cover it.
+    Partial,
+    /// No clip was saved; the logical moment is still recorded.
+    Failed,
 }
 
 enum Command {
     Update(GameStateUpdate),
     Settings(Settings),
-}
-
-struct FinalizeJob {
-    moment: Moment,
-    capture_range: RangeInclusive<u64>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ActiveCaptureRange {
-    moment_id: MomentId,
-    start_ms: u64,
-    end_ms: u64,
 }
 
 #[derive(Clone)]
@@ -66,7 +67,7 @@ impl AutomaticMomentService {
             .map_err(|error| openclip_core::OpenClipError::Unavailable(error.to_string()))?;
         thread::Builder::new()
             .name("openclip-moment-engine".to_owned())
-            .spawn(move || moment_worker(&receiver, &finalize_sender, &recorder, settings))
+            .spawn(move || moment_worker(&receiver, &finalize_sender, &recorder, &settings))
             .map_err(|error| openclip_core::OpenClipError::Unavailable(error.to_string()))?;
         Ok(Self { sender })
     }
@@ -86,109 +87,54 @@ impl AutomaticMomentService {
 
 fn moment_worker(
     receiver: &Receiver<Command>,
-    finalize_sender: &Sender<FinalizeJob>,
+    finalize_sender: &Sender<CaptureJob>,
     recorder: &RecorderService,
-    settings: Settings,
+    settings: &Settings,
 ) {
-    let mut detector = WindowedMomentDetector::from_settings(&settings);
-    let mut active_range: Option<ActiveCaptureRange> = None;
+    let mut engine = MomentEngine::new(settings);
     loop {
-        let wait = active_range.map_or(Duration::MAX, |range| {
-            Duration::from_millis(range.end_ms.saturating_sub(recorder.timeline_now_ms()))
-        });
-        let command = if wait == Duration::MAX {
-            receiver.recv().ok()
-        } else {
-            match receiver.recv_timeout(wait) {
-                Ok(command) => Some(command),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(active) = detector.active() {
-                        let end = active.end_offset_ms;
-                        if let Some(moment) = detector.finalize_expired(end)
-                            && let Some(range) = active_range.take()
-                        {
-                            send_finalize(finalize_sender, moment, range);
+        let command = match engine.next_deadline_ms() {
+            None => receiver.recv().ok(),
+            Some(deadline) => {
+                let wait = deadline.saturating_sub(recorder.timeline_now_ms());
+                match receiver.recv_timeout(Duration::from_millis(wait)) {
+                    Ok(command) => Some(command),
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Some(job) = engine.expire(recorder.timeline_now_ms()) {
+                            send_finalize(finalize_sender, job);
                         }
+                        continue;
                     }
-                    continue;
+                    Err(RecvTimeoutError::Disconnected) => None,
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
             }
         };
         let Some(command) = command else {
             break;
         };
         match command {
-            Command::Settings(settings) => detector.update_settings(&settings),
+            Command::Settings(settings) => engine.update_settings(&settings),
             Command::Update(update) => {
-                for event in update.events {
-                    let observed_ms = recorder.timeline_now_ms();
-                    let before_id = detector.active().map(|moment| moment.id);
-                    let before_events = detector.active().map_or(0, |moment| moment.events.len());
-                    match detector.ingest(event) {
-                        Ok(finalized) => {
-                            if let Some(moment) = finalized
-                                && let Some(range) = active_range.take()
-                            {
-                                send_finalize(finalize_sender, moment, range);
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "automatic moment event was rejected");
-                            continue;
-                        }
-                    }
-                    let Some(active) = detector.active() else {
-                        continue;
-                    };
-                    let after_id = Some(active.id);
-                    if before_id != after_id {
-                        let event_offset = active
-                            .events
-                            .last()
-                            .and_then(|item| item.match_offset_ms)
-                            .unwrap_or(active.start_offset_ms);
-                        active_range = Some(ActiveCaptureRange {
-                            moment_id: active.id,
-                            start_ms: observed_ms.saturating_sub(
-                                event_offset.saturating_sub(active.start_offset_ms),
-                            ),
-                            end_ms: observed_ms
-                                .saturating_add(active.end_offset_ms.saturating_sub(event_offset)),
-                        });
-                    } else if active.events.len() > before_events
-                        && matches!(
-                            active.events.last().map(|item| item.event_type),
-                            Some(GameEventType::Kill | GameEventType::Headshot)
-                        )
-                        && let Some(range) = active_range.as_mut()
-                    {
-                        let event_offset = active
-                            .events
-                            .last()
-                            .and_then(|item| item.match_offset_ms)
-                            .unwrap_or(active.end_offset_ms);
-                        range.end_ms = observed_ms
-                            .saturating_add(active.end_offset_ms.saturating_sub(event_offset));
-                    }
+                let now_ms = recorder.timeline_now_ms();
+                for job in engine.ingest(update.events, now_ms) {
+                    send_finalize(finalize_sender, job);
                 }
             }
         }
     }
+    if let Some(job) = engine.flush() {
+        send_finalize(finalize_sender, job);
+    }
 }
 
-fn send_finalize(sender: &Sender<FinalizeJob>, moment: Moment, range: ActiveCaptureRange) {
-    debug_assert_eq!(moment.id, range.moment_id);
-    if let Err(error) = sender.send(FinalizeJob {
-        moment,
-        capture_range: range.start_ms..=range.end_ms,
-    }) {
+fn send_finalize(sender: &Sender<CaptureJob>, job: CaptureJob) {
+    if let Err(error) = sender.send(job) {
         tracing::error!(%error, "automatic highlight save worker is unavailable");
     }
 }
 
 fn save_worker(
-    receiver: &Receiver<FinalizeJob>,
+    receiver: &Receiver<CaptureJob>,
     repository: &Arc<Mutex<SqliteRepository>>,
     recorder: &RecorderService,
     notify: &(dyn Fn(AutomaticMomentResult) + Send + Sync),
@@ -196,11 +142,14 @@ fn save_worker(
     while let Ok(job) = receiver.recv() {
         let mut moment = job.moment;
         let result = recorder.save_range(job.capture_range, moment.match_id, moment.id);
-        let (captured, error) = match result {
-            Ok(clip) => {
+        let (status, missing_ms, error) = match result {
+            Ok(saved) => {
+                let complete = saved.is_complete();
+                let missing_ms = saved.leading_shortfall_ms;
+                let clip = saved.clip;
                 moment.clip_id = Some(clip.id);
                 moment.clip_path = Some(clip.path.clone());
-                let saved = repository
+                let persisted = repository
                     .lock()
                     .map_err(|_| "database lock was poisoned".to_owned())
                     .and_then(|mut repository| {
@@ -208,9 +157,10 @@ fn save_worker(
                             .save_moment_with_clip(&moment, &clip)
                             .map_err(|error| error.to_string())
                     });
-                match saved {
-                    Ok(()) => (true, None),
-                    Err(error) => (false, Some(error)),
+                match persisted {
+                    Ok(()) if complete => (CaptureStatus::Captured, 0, None),
+                    Ok(()) => (CaptureStatus::Partial, missing_ms, None),
+                    Err(error) => (CaptureStatus::Failed, 0, Some(error)),
                 }
             }
             Err(capture_error) => {
@@ -226,19 +176,23 @@ fn save_worker(
                     |storage_error| format!("{capture_error}; {storage_error}"),
                     |()| capture_error.to_string(),
                 );
-                (false, Some(error))
+                (CaptureStatus::Failed, 0, Some(error))
             }
         };
+        let captured = status != CaptureStatus::Failed;
         tracing::info!(
             moment_id = %moment.id,
             classification = ?moment.classification,
-            captured,
+            ?status,
+            missing_ms,
             error,
             "automatic moment finalized"
         );
         notify(AutomaticMomentResult {
             moment,
             captured,
+            status,
+            missing_ms,
             error,
         });
     }

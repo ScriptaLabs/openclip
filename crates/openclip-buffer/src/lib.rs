@@ -3,6 +3,10 @@
 //! Encoded-segment storage and extraction arrive with the recording milestone. The moment
 //! detector lives here now because its timing contract determines what that buffer must retain.
 
+mod engine;
+
+pub use engine::{CaptureJob, MomentEngine};
+
 use std::collections::VecDeque;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -33,6 +37,28 @@ impl ReplaySegment {
 pub struct ReplaySelection {
     pub segments: Vec<ReplaySegment>,
     pub duration_ms: u64,
+    /// How much of the requested start is missing because the retained buffer begins later
+    /// (recorder started mid-window, or older segments were pruned or lost).
+    pub leading_shortfall_ms: u64,
+    /// False when a gap between consecutive segments means the clip skips footage.
+    pub contiguous: bool,
+}
+
+impl ReplaySelection {
+    /// True when the selection fully covers what was asked for without skipping footage.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.leading_shortfall_ms == 0 && self.contiguous
+    }
+}
+
+/// Segment boundaries are millisecond-rounded, so tiny jitter is not a real gap.
+const CONTIGUITY_TOLERANCE_MS: u64 = 100;
+
+fn is_contiguous(segments: &[ReplaySegment]) -> bool {
+    segments.windows(2).all(|pair| {
+        pair[1].started_at_ms.saturating_sub(pair[0].ended_at_ms) <= CONTIGUITY_TOLERANCE_MS
+    })
 }
 
 /// Hard-bounded, encoded-only rolling replay window.
@@ -91,10 +117,13 @@ impl SegmentReplayBuffer {
             .skip(start)
             .cloned()
             .collect::<Vec<_>>();
-        let duration_ms = latest_end.saturating_sub(segments.first()?.started_at_ms);
+        let first_start = segments.first()?.started_at_ms;
+        let duration_ms = latest_end.saturating_sub(first_start);
         Some(ReplaySelection {
+            contiguous: is_contiguous(&segments),
             segments,
             duration_ms,
+            leading_shortfall_ms: first_start.saturating_sub(requested_start),
         })
     }
 
@@ -124,6 +153,8 @@ impl SegmentReplayBuffer {
         }
         Some(ReplaySelection {
             duration_ms: last.ended_at_ms.saturating_sub(first.started_at_ms),
+            leading_shortfall_ms: first.started_at_ms.saturating_sub(requested_start),
+            contiguous: is_contiguous(&segments),
             segments,
         })
     }
@@ -435,6 +466,43 @@ mod tests {
         assert_eq!(selection.segments[0].started_at_ms, 2_000);
         assert_eq!(selection.segments.last().unwrap().ended_at_ms, 10_000);
         assert_eq!(selection.duration_ms, 8_000);
+    }
+
+    #[test]
+    fn ranged_selection_reports_missing_leading_footage() {
+        let mut buffer = SegmentReplayBuffer::new(60_000, 10_000);
+        for index in 3..6 {
+            buffer.push(segment(index, true));
+        }
+        let selection = buffer.select_range(2_000..=11_000).expect("selection");
+        assert_eq!(selection.leading_shortfall_ms, 4_000);
+        assert!(!selection.is_complete());
+    }
+
+    #[test]
+    fn ranged_selection_reports_gaps_between_segments() {
+        let mut buffer = SegmentReplayBuffer::new(60_000, 10_000);
+        buffer.push(segment(0, true));
+        buffer.push(segment(1, true));
+        buffer.push(segment(3, true));
+        let selection = buffer.select_range(0..=7_500).expect("selection");
+        assert_eq!(selection.leading_shortfall_ms, 0);
+        assert!(!selection.contiguous);
+        assert!(!selection.is_complete());
+    }
+
+    #[test]
+    fn contiguous_full_coverage_is_complete() {
+        let mut buffer = SegmentReplayBuffer::new(60_000, 10_000);
+        for index in 0..6 {
+            buffer.push(segment(index, true));
+        }
+        assert!(
+            buffer
+                .select_range(3_500..=8_200)
+                .expect("selection")
+                .is_complete()
+        );
     }
 
     #[test]

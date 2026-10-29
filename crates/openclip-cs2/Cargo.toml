@@ -18,6 +18,7 @@ tracing.workspace = true
 winreg = "0.55"
 
 [dev-dependencies]
+openclip-buffer = { path = "../openclip-buffer" }
 openclip-storage = { path = "../openclip-storage" }
 tempfile.workspace = true
 

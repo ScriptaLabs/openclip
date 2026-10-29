@@ -35,6 +35,26 @@ Scoring is deterministic and independent of GSI parsing, capture, and UI renderi
 The score supports predictable interesting-moment export and future ranking without discarding the
 underlying event references.
 
+## Timing and the engine
+
+`MomentEngine` (in `openclip-buffer`) owns window grouping and the requested capture range. It takes
+the recorder timeline clock as an argument and re-stamps every event from the moment its GSI update
+was observed, so grouping and the saved range share one clock rather than the whole-second GSI
+timestamp. The desktop host only feeds it updates and persists its jobs. The adapter attributes a
+kill that arrives in the same payload as round-over or game-over to the round and match that are
+still open, so the round-winning kill stays inside its multi-kill and the match-winning kill is not
+lost.
+
+`crates/openclip-cs2/tests/replay_pipeline.rs` replays timed GSI payloads through the real adapter
+and engine on a fake clock. New edge cases (FACEIT, reconnects) should be added there first.
+
+## Capture status
+
+Each finalized automatic moment reports `captured`, `partial` or `failed`. `partial` means a clip
+exists but the retained buffer began after the requested start or skipped footage between segments;
+`missingMs` carries the missing lead-in. `failed` means no clip was saved and the moment is kept
+without one.
+
 ## Capture and persistence
 
 When a Moment closes, the save worker requests its exact logical capture range. The rolling buffer

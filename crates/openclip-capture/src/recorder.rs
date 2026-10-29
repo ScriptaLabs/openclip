@@ -31,6 +31,23 @@ pub(crate) struct SharedRecorder {
     pub settings_generation: AtomicU64,
 }
 
+/// A ranged save plus how faithfully the retained buffer covered the request.
+#[derive(Debug, Clone)]
+pub struct SavedRange {
+    pub clip: Clip,
+    /// Requested footage missing at the start of the clip.
+    pub leading_shortfall_ms: u64,
+    /// False when the clip skips footage between segments.
+    pub contiguous: bool,
+}
+
+impl SavedRange {
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.leading_shortfall_ms == 0 && self.contiguous
+    }
+}
+
 #[derive(Clone)]
 pub struct RecorderService {
     pub(crate) shared: Arc<SharedRecorder>,
@@ -151,7 +168,7 @@ impl RecorderService {
         requested: RangeInclusive<u64>,
         match_id: MatchId,
         moment_id: MomentId,
-    ) -> Result<Clip> {
+    ) -> Result<SavedRange> {
         let _save = lock(&self.shared.save_lock);
         let previous = self.status();
         // Automatic moments can finish just after CS2 closes or its capture target is recreated.
@@ -172,7 +189,7 @@ impl RecorderService {
         requested: RangeInclusive<u64>,
         match_id: MatchId,
         moment_id: MomentId,
-    ) -> Result<Clip> {
+    ) -> Result<SavedRange> {
         let requested_end = *requested.end();
         let until_requested_end = requested_end.saturating_sub(self.timeline_now_ms());
         let deadline = Instant::now()
@@ -207,13 +224,18 @@ impl RecorderService {
                 .collect::<Vec<_>>(),
         );
         drop(buffer);
-        self.save_selection(
+        let clip = self.save_selection(
             &selection,
             Some(match_id),
             Some(moment_id),
             ClipSource::AutomaticMoment,
             "highlight",
-        )
+        )?;
+        Ok(SavedRange {
+            clip,
+            leading_shortfall_ms: selection.leading_shortfall_ms,
+            contiguous: selection.contiguous,
+        })
     }
 
     fn save_selection(
@@ -507,7 +529,7 @@ mod tests {
         });
         recorder.shared.buffer_finalized.notify_all();
 
-        let clip = handle.join().unwrap().expect("ranged clip saves");
+        let clip = handle.join().unwrap().expect("ranged clip saves").clip;
         assert_eq!(clip.source, ClipSource::AutomaticMoment);
         assert_eq!(clip.moment_id, Some(moment_id));
     }
