@@ -31,7 +31,8 @@ function App() {
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const refresh = useMemo(() => async (isActive: () => boolean = () => true) => {
+  // Resolves to whether the data loaded, so callers can retry a failed load.
+  const refresh = useMemo(() => async (isActive: () => boolean = () => true): Promise<boolean> => {
     try {
       const [nextMatches, nextStatus, nextRecordingStatus, settings] = await Promise.all([
         matchRepository.list(),
@@ -39,22 +40,35 @@ function App() {
         getRecordingStatus(),
         getSettings(),
       ]);
-      if (!isActive()) return;
+      if (!isActive()) return true;
       setMatches(nextMatches);
       setStatus(nextStatus);
       setRecordingStatus(nextRecordingStatus);
       setSelectedMatch((current) => current ? nextMatches.find((item) => item.id === current.id) ?? null : null);
       document.documentElement.dataset.accent = settings.accent;
       setLoadError(null);
+      return true;
     } catch (error) {
       if (isActive()) setLoadError(error instanceof Error ? error.message : String(error));
+      return false;
     }
   }, []);
 
   useEffect(() => {
     let active = true;
     const isActive = () => active;
-    void refresh(isActive);
+    // The desktop host can still be starting when the window first asks for data. A failed
+    // load is retried with a growing delay instead of leaving its error on screen.
+    let attempts = 0;
+    let retry: number | undefined;
+    const load = async () => {
+      const loaded = await refresh(isActive);
+      if (!loaded && isActive() && attempts < 12) {
+        attempts += 1;
+        retry = window.setTimeout(() => void load(), Math.min(1_000 + attempts * 500, 5_000));
+      }
+    };
+    void load();
     const interval = window.setInterval(() => {
       void getCs2Status().then(setStatus).catch(() => {});
       void getRecordingStatus().then(setRecordingStatus).catch(() => {});
@@ -67,6 +81,7 @@ function App() {
     }
     return () => {
       active = false;
+      window.clearTimeout(retry);
       window.clearInterval(interval);
       unlisten.forEach((stop) => stop());
     };

@@ -968,7 +968,6 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!(%error, "could not emit automatic moment result");
         }
     });
-    overlay::create(app.handle());
     let automatic = AutomaticMomentService::start(
         repository.clone(),
         recorder.clone(),
@@ -991,6 +990,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         updates,
     });
 
+    // Only after the state is managed. Creating another WebView2 window pumps messages, which
+    // lets the main window's first commands run; they must find the state already registered.
+    overlay::create(app.handle());
     setup_tray(app)?;
     show_window_unless_background(app);
 
@@ -1037,14 +1039,42 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Logs to the console in development. A release build has no console window, so it writes to
+/// `%APPDATA%\dev.openclip.app\openclip.log` instead (rotated at 2 MB) to keep problems diagnosable.
+fn init_logging() {
+    const DEFAULT_FILTER: &str = "warn,openclip_app_lib=info,openclip_capture=info,openclip_cs2=info,openclip_buffer=info,openclip_storage=info";
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| DEFAULT_FILTER.into());
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    match release_log_file() {
+        Some(file) => builder
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+            .init(),
+        None => builder.init(),
+    }
+}
+
+fn release_log_file() -> Option<std::fs::File> {
+    if cfg!(debug_assertions) {
+        return None;
+    }
+    let directory = PathBuf::from(std::env::var_os("APPDATA")?).join("dev.openclip.app");
+    std::fs::create_dir_all(&directory).ok()?;
+    let path = directory.join("openclip.log");
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 2_000_000) {
+        let _ = std::fs::rename(&path, directory.join("openclip.previous.log"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "openclip=info".into()),
-        )
-        .init();
+    init_logging();
 
     tauri::Builder::default()
         // Must be first: a second launch (for example the Start menu while OpenClip is in the
