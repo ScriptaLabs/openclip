@@ -43,6 +43,8 @@ export interface RecordingSettings {
   captureKills: boolean;
   captureHeadshots: boolean;
   captureMultiKills: boolean;
+  /** Kills closer together than this many seconds count as one multi-kill. */
+  multiKillWindowSeconds: number;
   captureGameAudio: boolean;
   captureMicrophone: boolean;
   microphoneDeviceId: string | null;
@@ -161,6 +163,7 @@ const browserSettings: RecordingSettings = {
   captureKills: true,
   captureHeadshots: true,
   captureMultiKills: true,
+  multiKillWindowSeconds: 8,
   captureGameAudio: true,
   captureMicrophone: false,
   microphoneDeviceId: null,

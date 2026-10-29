@@ -259,6 +259,9 @@ export function SettingsPage() {
             <Setting label="Multi-kills" help="Merge nearby kills in the same round into one clip.">
               <Switch checked={s?.captureMultiKills ?? false} disabled={!s} label="Multi-kills" onChange={(captureMultiKills) => s && save({ ...s, captureMultiKills })} />
             </Setting>
+            <Setting disabled={!s?.captureMultiKills} label="Multi-kill window" help="Kills closer together than this count as one multi-kill. A longer window groups slower double and triple kills.">
+              <Segmented disabled={!s || !s.captureMultiKills} label="Multi-kill window" onChange={(multiKillWindowSeconds) => s && save({ ...s, multiKillWindowSeconds })} options={[5, 8, 12, 15].map((value) => ({ value, label: `${value} s` }))} value={s?.multiKillWindowSeconds ?? 8} />
+            </Setting>
             <Setting label="Before the kill" help="Footage kept ahead of the first kill.">
               <Segmented disabled={!s} label="Before the kill" onChange={(preRollSeconds) => s && save({ ...s, preRollSeconds })} options={[5, 10, 15].map((value) => ({ value, label: `${value} s` }))} value={s?.preRollSeconds ?? 10} />
             </Setting>

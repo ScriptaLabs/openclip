@@ -372,6 +372,7 @@ fn update_settings(
     let manual_replay_shortcut = settings.manual_replay_shortcut.trim().to_owned();
     settings.manual_replay_shortcut = manual_replay_shortcut;
     settings.sound_volume = settings.sound_volume.min(100);
+    settings.multi_kill_window_seconds = settings.multi_kill_window_seconds.clamp(2, 30);
     if settings.manual_replay_shortcut.is_empty() {
         return Err("choose a manual replay shortcut".to_owned());
     }

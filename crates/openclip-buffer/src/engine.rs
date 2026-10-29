@@ -25,7 +25,10 @@ pub struct CaptureJob {
 struct ActiveRange {
     moment_id: MomentId,
     start_ms: u64,
+    /// End of the clip to save: one post-roll after the last kill.
     end_ms: u64,
+    /// When the moment stops waiting for another kill. Later than `end_ms` for a wide window.
+    close_ms: u64,
 }
 
 #[derive(Debug)]
@@ -55,7 +58,7 @@ impl MomentEngine {
     /// Timeline instant at which the open moment's post-roll expires.
     #[must_use]
     pub fn next_deadline_ms(&self) -> Option<u64> {
-        self.active_range.map(|range| range.end_ms)
+        self.active_range.map(|range| range.close_ms)
     }
 
     /// Feeds the events of one observed update. All events share `now_ms`.
@@ -86,17 +89,20 @@ impl MomentEngine {
             let post_roll = active
                 .end_offset_ms
                 .saturating_sub(event_offset.unwrap_or(active.end_offset_ms));
+            let hold = self.detector.merge_window_ms();
             if Some(active.id) != before_id {
                 self.active_range = Some(ActiveRange {
                     moment_id: active.id,
                     start_ms: now_ms.saturating_sub(self.pre_roll_ms),
                     end_ms: now_ms.saturating_add(post_roll),
+                    close_ms: now_ms.saturating_add(hold),
                 });
             } else if is_kill
                 && active.events.len() > before_events
                 && let Some(range) = self.active_range.as_mut()
             {
                 range.end_ms = range.end_ms.max(now_ms.saturating_add(post_roll));
+                range.close_ms = range.close_ms.max(now_ms.saturating_add(hold));
             }
         }
         jobs
@@ -105,11 +111,11 @@ impl MomentEngine {
     /// Closes the open moment once its post-roll has elapsed on the timeline.
     pub fn expire(&mut self, now_ms: u64) -> Option<CaptureJob> {
         let range = self.active_range?;
-        if now_ms < range.end_ms {
+        if now_ms < range.close_ms {
             return None;
         }
-        let end_offset = self.detector.active()?.end_offset_ms;
-        let moment = self.detector.finalize_expired(end_offset)?;
+        let closes_at = self.detector.closes_at_ms()?;
+        let moment = self.detector.finalize_expired(closes_at)?;
         self.close(moment)
     }
 
@@ -161,6 +167,16 @@ mod tests {
         Settings {
             pre_roll_seconds: 10,
             post_roll_seconds: 5,
+            multi_kill_window_seconds: 5,
+            ..Settings::default()
+        }
+    }
+
+    fn wide_window() -> Settings {
+        Settings {
+            pre_roll_seconds: 10,
+            post_roll_seconds: 3,
+            multi_kill_window_seconds: 8,
             ..Settings::default()
         }
     }
@@ -249,6 +265,40 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].moment.events.len(), 1);
         assert_eq!(engine.next_deadline_ms(), Some(17_000));
+    }
+
+    #[test]
+    fn spaced_kills_stay_together_without_stretching_the_clip() {
+        let match_id = MatchId::new();
+        let round = Some(RoundId::new());
+        let mut engine = MomentEngine::new(&wide_window());
+        engine.ingest(vec![event(match_id, round, GameEventType::MatchStart)], 0);
+        // Seven seconds apart: farther than the 3 s post-roll, inside the 8 s window.
+        for now in [30_000, 37_000, 44_000] {
+            assert_eq!(
+                engine.ingest(vec![event(match_id, round, GameEventType::Kill)], now),
+                Vec::new()
+            );
+        }
+        assert_eq!(engine.next_deadline_ms(), Some(52_000));
+        assert!(engine.expire(51_999).is_none());
+        let job = engine.expire(52_000).expect("moment");
+        assert_eq!(job.moment.classification, MomentClassification::TripleKill);
+        // The clip still ends one post-roll after the last kill, not at the end of the window.
+        assert_eq!(job.capture_range, 20_000..=47_000);
+    }
+
+    #[test]
+    fn kills_farther_apart_than_the_window_are_separate_moments() {
+        let match_id = MatchId::new();
+        let round = Some(RoundId::new());
+        let mut engine = MomentEngine::new(&wide_window());
+        engine.ingest(vec![event(match_id, round, GameEventType::MatchStart)], 0);
+        engine.ingest(vec![event(match_id, round, GameEventType::Kill)], 30_000);
+        let jobs = engine.ingest(vec![event(match_id, round, GameEventType::Kill)], 38_001);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].moment.events.len(), 1);
+        assert_eq!(jobs[0].capture_range, 20_000..=33_000);
     }
 
     #[test]

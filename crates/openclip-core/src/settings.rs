@@ -52,6 +52,10 @@ pub struct Settings {
     pub capture_kills: bool,
     pub capture_headshots: bool,
     pub capture_multi_kills: bool,
+    /// How long after a kill another kill still joins the same multi-kill, in seconds. It is
+    /// independent of the post-roll, which only decides how much footage follows the last kill.
+    #[serde(default = "default_multi_kill_window")]
+    pub multi_kill_window_seconds: u16,
     pub capture_game_audio: bool,
     pub capture_microphone: bool,
     #[serde(default)]
@@ -94,6 +98,7 @@ impl Default for Settings {
             capture_kills: true,
             capture_headshots: true,
             capture_multi_kills: true,
+            multi_kill_window_seconds: default_multi_kill_window(),
             capture_game_audio: true,
             capture_microphone: false,
             microphone_device_id: None,
@@ -114,6 +119,10 @@ impl Default for Settings {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_multi_kill_window() -> u16 {
+    8
 }
 
 const fn default_sound_volume() -> u8 {
@@ -155,6 +164,7 @@ mod tests {
         assert!(settings.overlay_clip_preview);
         assert!(settings.sounds_enabled);
         assert_eq!(settings.sound_volume, 60);
+        assert_eq!(settings.multi_kill_window_seconds, 8);
         assert!(settings.auto_update);
         assert!(settings.close_to_tray);
     }

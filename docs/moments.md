@@ -7,10 +7,14 @@ segments or write clips.
 ## Lifecycle and boundaries
 
 A qualifying kill at capture time `T` opens a window from `T - pre_roll` through
-`T + post_roll` (saturating at zero). A later qualifying kill in the same match and round extends
-the active end to its own post-roll. With multi-kills disabled, a later kill closes the current
-window instead of merging it. A timer uses channel receive deadlines rather than a polling loop and
-closes the Moment only after the last event's post-roll expires.
+`T + post_roll` (saturating at zero). A later qualifying kill in the same match and round joins the
+same Moment when it lands within the **multi-kill window** of the previous kill (default 8 s,
+adjustable from 2 s to 30 s). The window is independent of the post-roll: a short clip tail never
+makes grouping stricter. Each kill moves the clip's end to its own `post_roll`, while the Moment
+stays open for the full window in case another kill follows, then closes and is saved. A single
+multi-kill spans at most 60 s, so an unbroken chain (deathmatch, retakes) becomes several clips and
+no kill is dropped. With multi-kills disabled, a later kill closes the current window instead of
+merging it. A timer uses channel receive deadlines rather than a polling loop.
 
 Round end/start and match end/start close pending state at the boundary. Events from different
 rounds or matches never merge. Kill capture, known-headshot interest, multi-kill merging, pre-roll,

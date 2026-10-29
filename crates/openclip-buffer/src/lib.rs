@@ -194,6 +194,7 @@ impl SegmentReplayBuffer {
 pub struct WindowedMomentDetector {
     pre_roll_ms: u64,
     post_roll_ms: u64,
+    merge_window_ms: u64,
     active: Option<Moment>,
     capture_kills: bool,
     capture_headshots: bool,
@@ -206,6 +207,7 @@ impl WindowedMomentDetector {
         Self {
             pre_roll_ms,
             post_roll_ms,
+            merge_window_ms: post_roll_ms,
             active: None,
             capture_kills: true,
             capture_headshots: true,
@@ -218,6 +220,7 @@ impl WindowedMomentDetector {
         Self {
             pre_roll_ms: u64::from(settings.pre_roll_seconds) * 1_000,
             post_roll_ms: u64::from(settings.post_roll_seconds) * 1_000,
+            merge_window_ms: merge_window_ms(settings),
             active: None,
             capture_kills: settings.capture_kills,
             capture_headshots: settings.capture_headshots,
@@ -228,6 +231,7 @@ impl WindowedMomentDetector {
     pub fn update_settings(&mut self, settings: &Settings) {
         self.pre_roll_ms = u64::from(settings.pre_roll_seconds) * 1_000;
         self.post_roll_ms = u64::from(settings.post_roll_seconds) * 1_000;
+        self.merge_window_ms = merge_window_ms(settings);
         self.capture_kills = settings.capture_kills;
         self.capture_headshots = settings.capture_headshots;
         self.merge_multi_kills = settings.capture_multi_kills;
@@ -238,11 +242,42 @@ impl WindowedMomentDetector {
         self.active.as_ref()
     }
 
+    /// Overrides the multi-kill window (the default equals the post-roll).
+    #[must_use]
+    pub const fn with_merge_window(mut self, merge_window_ms: u64) -> Self {
+        self.merge_window_ms = merge_window_ms;
+        self
+    }
+
+    /// How long after a kill the next one still joins the same moment. Never shorter than the
+    /// post-roll, so a short clip tail cannot make grouping stricter.
+    #[must_use]
+    pub const fn merge_window_ms(&self) -> u64 {
+        if self.merge_window_ms > self.post_roll_ms {
+            self.merge_window_ms
+        } else {
+            self.post_roll_ms
+        }
+    }
+
+    /// Offset at which the open moment stops accepting kills. This can be later than the end of
+    /// its clip: the clip ends one post-roll after the last kill, but the moment waits a little
+    /// longer in case another kill follows.
+    #[must_use]
+    pub fn closes_at_ms(&self) -> Option<u64> {
+        let active = self.active.as_ref()?;
+        let last = active
+            .events
+            .last()
+            .and_then(|event| event.match_offset_ms)
+            .unwrap_or_else(|| active.end_offset_ms.saturating_sub(self.post_roll_ms));
+        Some(last.saturating_add(self.merge_window_ms()))
+    }
+
     pub fn finalize_expired(&mut self, now_offset_ms: u64) -> Option<Moment> {
         if self
-            .active
-            .as_ref()
-            .is_some_and(|moment| now_offset_ms >= moment.end_offset_ms)
+            .closes_at_ms()
+            .is_some_and(|closes| now_offset_ms >= closes)
         {
             return self.active.take();
         }
@@ -322,6 +357,10 @@ impl WindowedMomentDetector {
     }
 }
 
+fn merge_window_ms(settings: &Settings) -> u64 {
+    u64::from(settings.multi_kill_window_seconds.clamp(2, 30)) * 1_000
+}
+
 fn metadata_flag(event: &GameEvent, name: &str) -> bool {
     event
         .metadata
@@ -360,7 +399,7 @@ fn special_kill_score(event: &GameEvent) -> f32 {
 }
 
 /// A chain of kills that never pauses (deathmatch, retakes) must not become one endless clip.
-const MAX_MOMENT_SPAN_MS: u64 = 45_000;
+const MAX_MOMENT_SPAN_MS: u64 = 60_000;
 
 impl MomentDetector for WindowedMomentDetector {
     fn ingest(&mut self, event: GameEvent) -> openclip_core::Result<Option<Moment>> {
@@ -393,10 +432,15 @@ impl MomentDetector for WindowedMomentDetector {
             return Ok(None);
         };
 
+        let window = self.merge_window_ms();
         if let Some(active) = self.active.as_mut()
             && active.match_id == event.match_id
             && active.round_id == event.round_id
-            && offset <= active.end_offset_ms
+            && active
+                .events
+                .last()
+                .and_then(|last| last.match_offset_ms)
+                .is_none_or(|last| offset <= last.saturating_add(window))
             && active
                 .events
                 .first()
@@ -602,11 +646,11 @@ mod tests {
             }
         }
         finalized.extend(detector.flush());
-        assert!(finalized.len() >= 3, "got {} moments", finalized.len());
+        assert!(finalized.len() >= 2, "got {} moments", finalized.len());
         for moment in &finalized {
             let first = moment.events.first().unwrap().match_offset_ms.unwrap();
             let last = moment.events.last().unwrap().match_offset_ms.unwrap();
-            assert!(last - first < 45_000);
+            assert!(last - first < 60_000);
         }
         let kills: usize = finalized.iter().map(|moment| moment.events.len()).sum();
         assert_eq!(kills, 30, "no kill is dropped by splitting");
