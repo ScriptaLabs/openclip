@@ -8,9 +8,16 @@ use std::time::Duration;
 use serde::Serialize;
 
 mod config;
+#[cfg(windows)]
+mod encoder;
+mod h264;
 mod media;
 #[cfg(windows)]
+#[allow(unsafe_code)]
+mod mf_backend;
+#[cfg(windows)]
 mod nvenc_backend;
+mod pixel;
 mod recorder;
 #[cfg(windows)]
 #[allow(unsafe_code)]

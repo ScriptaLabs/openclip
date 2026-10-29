@@ -13,8 +13,9 @@ Milestone 5 replaces the video transcoder with a direct NVIDIA NVENC pipeline bu
 edit-ready replay timing while retaining Milestone 4 automatic highlights:
 
 - Windows Graphics Capture targeting the largest visible `cs2.exe` window
-- WGC D3D11 textures registered directly with a dynamically loaded NVIDIA Encode API session;
-  there is no per-frame CPU pixel readback or Media Foundation video encoder
+- on NVIDIA, WGC D3D11 textures registered directly with a dynamically loaded Encode API session;
+  no per-frame CPU pixel readback. On Intel, AMD and other GPUs the vendor's Media Foundation
+  H.264 encoder is used instead, with Windows' CPU encoder as the last resort (see `docs/capture.md`)
 - one continuous NVENC session with deterministic 30/60 FPS pacing, persistent texture
   registrations, low-latency P4 encoding, and GPU video-processor scaling
 - process-tree WASAPI game audio plus optional selected-device microphone capture/mixing, encoded as
@@ -65,7 +66,8 @@ See [`docs/architecture.md`](docs/architecture.md) for the dependency rules and 
 ## Prerequisites
 
 - Windows 10 or 11
-- an NVIDIA GPU/driver exposing NVENC H.264 (`nvEncodeAPI64.dll`)
+- any GPU with a Windows H.264 encoder (NVIDIA, Intel, AMD and others); without one, OpenClip
+  records with Windows' built-in CPU encoder at a higher cost to the game
 - Rust stable toolchain
 - Node.js 22 or newer and npm
 - Microsoft C++ Build Tools and WebView2 (required by Tauri on Windows)

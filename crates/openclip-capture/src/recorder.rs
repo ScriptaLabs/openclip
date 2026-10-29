@@ -290,7 +290,10 @@ impl RecorderService {
             height: media.height,
             frames_per_second: settings.frames_per_second.min(60),
             codec: "h264".to_owned(),
-            encoder: "nvidia_nvenc_directx11".to_owned(),
+            encoder: lock(&self.shared.status)
+                .encoder
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
             has_game_audio: settings.capture_game_audio && media.has_audio,
         })
     }
@@ -326,6 +329,7 @@ fn capture_pipeline_changed(previous: &Settings, next: &Settings) -> bool {
     previous.quality != next.quality
         || previous.resolution != next.resolution
         || previous.frames_per_second != next.frames_per_second
+        || previous.video_encoder != next.video_encoder
         || previous.capture_game_audio != next.capture_game_audio
         || previous.capture_microphone != next.capture_microphone
         || previous.microphone_device_id != next.microphone_device_id

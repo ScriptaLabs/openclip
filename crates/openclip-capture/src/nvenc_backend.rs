@@ -1,6 +1,5 @@
 #![allow(unsafe_code)]
 
-use mp4io::{Codec, InputSample, TrackParams, Writer, WriterConfig};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::mem::MaybeUninit;
@@ -39,22 +38,16 @@ use windows::core::Interface;
 use windows_capture::frame::Frame;
 
 use crate::config::EncoderConfig;
+use crate::h264::{
+    BackendError, VideoSegment, annex_b_to_length_prefixed, assemble_segment, avcc_from_annex_b,
+};
 
-const MP4_VIDEO_TIMESCALE: u32 = 90_000;
 const HUNDRED_NS_PER_SECOND: u64 = 10_000_000;
-
-type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
 fn nvenc_result(result: nvenc::sys::result::NVencResult) -> Result<(), BackendError> {
     result
         .into_error()
         .map_err(|error| format!("NVENC error: {error:?}").into())
-}
-
-/// A single independently playable H.264 segment produced by one continuous NVENC session.
-pub(crate) struct VideoSegment {
-    pub bytes: Vec<u8>,
-    pub frame_count: u32,
 }
 
 /// Converts irregular WGC arrival timestamps into a deterministic constant-frame-rate timeline.
@@ -357,34 +350,13 @@ impl DirectNvencEncoder {
             .avcc
             .as_ref()
             .ok_or("NVENC did not emit H.264 parameter sets")?;
-        let width = u16::try_from(self.config.width)
-            .map_err(|_| "NVENC width exceeds the MP4 field limit")?;
-        let height = u16::try_from(self.config.height)
-            .map_err(|_| "NVENC height exceeds the MP4 field limit")?;
-        let mut writer = Writer::new(WriterConfig::default());
-        let track = writer.add_track(
-            TrackParams::video(Codec::H264, width, height)
-                .timescale(MP4_VIDEO_TIMESCALE)
-                .avc_config(avcc.clone()),
-        );
-        let frame_duration = MP4_VIDEO_TIMESCALE / u32::from(self.config.frames_per_second);
         let frames = std::mem::take(&mut self.segment_frames);
-        for (index, bytes) in frames.iter().enumerate() {
-            writer.write_sample(
-                track,
-                InputSample {
-                    data: bytes,
-                    duration: frame_duration,
-                    composition_offset: 0,
-                    is_sync: index == 0,
-                },
-            )?;
-        }
-        let frame_count = u32::try_from(frames.len()).unwrap_or(u32::MAX);
-        Ok(VideoSegment {
-            bytes: writer.finalize()?,
-            frame_count,
-        })
+        assemble_segment(
+            avcc,
+            (self.config.width, self.config.height),
+            self.config.frames_per_second,
+            &frames,
+        )
     }
 }
 
@@ -599,68 +571,6 @@ impl Drop for DirectNvencEncoder {
     }
 }
 
-fn annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
-    let mut starts = Vec::new();
-    let mut index = 0;
-    while index + 3 <= data.len() {
-        let prefix = if data[index..].starts_with(&[0, 0, 0, 1]) {
-            4
-        } else if data[index..].starts_with(&[0, 0, 1]) {
-            3
-        } else {
-            index += 1;
-            continue;
-        };
-        starts.push((index, prefix));
-        index += prefix;
-    }
-    starts
-        .iter()
-        .enumerate()
-        .filter_map(|(position, (start, prefix))| {
-            let body_start = start + prefix;
-            let body_end = starts.get(position + 1).map_or(data.len(), |next| next.0);
-            (body_start < body_end).then_some(&data[body_start..body_end])
-        })
-        .collect()
-}
-
-fn avcc_from_annex_b(data: &[u8]) -> Result<Vec<u8>, BackendError> {
-    let nals = annex_b_nals(data);
-    let sps = nals
-        .iter()
-        .copied()
-        .find(|nal| nal.first().is_some_and(|byte| byte & 0x1f == 7))
-        .ok_or("NVENC first IDR omitted SPS")?;
-    let pps = nals
-        .iter()
-        .copied()
-        .find(|nal| nal.first().is_some_and(|byte| byte & 0x1f == 8))
-        .ok_or("NVENC first IDR omitted PPS")?;
-    if sps.len() < 4 || sps.len() > usize::from(u16::MAX) || pps.len() > usize::from(u16::MAX) {
-        return Err("invalid NVENC H.264 parameter set".into());
-    }
-    let mut avcc = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
-    avcc.extend_from_slice(&u16::try_from(sps.len())?.to_be_bytes());
-    avcc.extend_from_slice(sps);
-    avcc.push(1);
-    avcc.extend_from_slice(&u16::try_from(pps.len())?.to_be_bytes());
-    avcc.extend_from_slice(pps);
-    Ok(avcc)
-}
-
-fn annex_b_to_length_prefixed(data: &[u8]) -> Result<Vec<u8>, BackendError> {
-    let mut output = Vec::with_capacity(data.len());
-    for nal in annex_b_nals(data) {
-        output.extend_from_slice(&u32::try_from(nal.len())?.to_be_bytes());
-        output.extend_from_slice(nal);
-    }
-    if output.is_empty() {
-        return Err("NVENC returned an empty or non-Annex-B packet".into());
-    }
-    Ok(output)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,18 +610,5 @@ mod tests {
         }
         assert!((598..=602).contains(&emitted));
         assert!((148..=152).contains(&skipped));
-    }
-
-    #[test]
-    fn builds_avcc_and_length_prefixed_samples_from_annex_b() {
-        let packet = [
-            0, 0, 0, 1, 0x67, 0x64, 0, 0x2a, 1, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, 0, 0, 1, 0x65,
-            0xaa,
-        ];
-        let avcc = avcc_from_annex_b(&packet).unwrap();
-        assert_eq!(&avcc[..6], &[1, 0x64, 0, 0x2a, 0xff, 0xe1]);
-        let sample = annex_b_to_length_prefixed(&packet).unwrap();
-        assert_eq!(&sample[..4], &5_u32.to_be_bytes());
-        assert!(sample.ends_with(&[0, 0, 0, 2, 0x65, 0xaa]));
     }
 }

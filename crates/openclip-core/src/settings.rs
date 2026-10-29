@@ -18,6 +18,20 @@ pub enum RecordingResolution {
     P1440,
 }
 
+/// Which video encoder `OpenClip` may use. Every choice keeps recording working on any GPU.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEncoderPreference {
+    /// Hardware encoding on NVIDIA, Intel, AMD and other GPUs, falling back to the CPU if the GPU
+    /// offers none.
+    #[default]
+    Auto,
+    /// Hardware encoding only. Recording reports an error instead of using the CPU.
+    Hardware,
+    /// CPU encoding only. Slower and heavier on the game, but works on any machine.
+    Software,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccentPreference {
@@ -46,6 +60,9 @@ pub struct Settings {
     pub quality: RecordingQuality,
     pub resolution: RecordingResolution,
     pub frames_per_second: u16,
+    /// Which encoder records the game. See [`VideoEncoderPreference`].
+    #[serde(default)]
+    pub video_encoder: VideoEncoderPreference,
     pub replay_buffer_seconds: u16,
     pub pre_roll_seconds: u16,
     pub post_roll_seconds: u16,
@@ -92,6 +109,7 @@ impl Default for Settings {
             quality: RecordingQuality::High,
             resolution: RecordingResolution::GameResolution,
             frames_per_second: 60,
+            video_encoder: VideoEncoderPreference::Auto,
             replay_buffer_seconds: 45,
             pre_roll_seconds: 10,
             post_roll_seconds: 5,
@@ -165,6 +183,7 @@ mod tests {
         assert!(settings.sounds_enabled);
         assert_eq!(settings.sound_volume, 60);
         assert_eq!(settings.multi_kill_window_seconds, 8);
+        assert_eq!(settings.video_encoder, super::VideoEncoderPreference::Auto);
         assert!(settings.auto_update);
         assert!(settings.close_to_tray);
     }

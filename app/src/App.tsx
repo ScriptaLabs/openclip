@@ -144,7 +144,7 @@ function App() {
       </div>
     );
   } else {
-    content = <SettingsPage />;
+    content = <SettingsPage recordingStatus={recordingStatus} />;
   }
 
   return (

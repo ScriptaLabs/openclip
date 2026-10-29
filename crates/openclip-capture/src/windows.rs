@@ -23,8 +23,10 @@ use windows_capture::window::Window;
 
 use crate::AudioDevice;
 use crate::config::{EncoderConfig, encoder_config};
+use crate::encoder::SegmentEncoder;
+use crate::h264::VideoSegment;
 use crate::media::mux_video_with_audio;
-use crate::nvenc_backend::{DirectNvencEncoder, FramePacer, VideoSegment};
+use crate::nvenc_backend::FramePacer;
 use crate::recorder::{SharedRecorder, lock, read, set_status, waiting_status};
 
 const AUDIO_CHANNEL_CAPACITY: usize = 128;
@@ -107,7 +109,7 @@ struct FinalizationJob {
 
 struct Cs2CaptureHandler {
     flags: HandlerFlags,
-    encoder: Option<DirectNvencEncoder>,
+    encoder: Option<SegmentEncoder>,
     pacer: Option<FramePacer>,
     audio_segment: Option<PreparedAudioSegment>,
     segment_started_at_ms: u64,
@@ -181,7 +183,7 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
             let copies = self
                 .pacer
                 .as_mut()
-                .expect("NVENC and pacer are initialized together")
+                .expect("encoder and pacer are initialized together")
                 .frames_due(timestamp);
             let encode_started = Instant::now();
             if let Some(segment) = encoder.encode_frame(frame, copies)? {
@@ -292,7 +294,9 @@ impl Cs2CaptureHandler {
                 .unwrap_or(u64::MAX),
         );
         let initialized = Instant::now();
-        self.encoder = Some(DirectNvencEncoder::new(frame, config)?);
+        let preference = read(&self.flags.shared.settings).video_encoder;
+        let (encoder, info) = SegmentEncoder::select(frame, config, preference)?;
+        self.encoder = Some(encoder);
         self.pacer = Some(FramePacer::new(config.frames_per_second));
         self.audio_segment = Some(prepared);
         let _ = self.flags.audio_encoder_request.try_send(source_size);
@@ -307,7 +311,7 @@ impl Cs2CaptureHandler {
             || format!("Replay active · {manual_replay_shortcut} saves the last 15 seconds"),
             |error| format!("Replay active · audio unavailable: {error}"),
         ));
-        status.encoder = Some("NVIDIA NVENC DirectX 11".to_owned());
+        status.encoder = Some(info.label.clone());
         status.capture_width = Some(config.width);
         status.capture_height = Some(config.height);
         status.capture_fps = Some(config.frames_per_second);
@@ -321,7 +325,8 @@ impl Cs2CaptureHandler {
             init_ms = initialized.elapsed().as_millis(),
             audio_init_ms = self.audio_segment.as_ref().map_or(0, |audio| audio.init_ms),
             backend = %status.encoder.as_deref().unwrap_or("unknown"),
-            "continuous direct NVENC encoder initialized"
+            hardware = info.hardware,
+            "continuous encoder initialized"
         );
         Ok(())
     }
@@ -568,10 +573,6 @@ fn spawn_segment_finalizer(
 fn supervise(shared: &Arc<SharedRecorder>, stop: &Arc<AtomicBool>) {
     let sequence = Arc::new(AtomicU64::new(0));
     while !stop.load(Ordering::Acquire) {
-        if !hardware_ready(shared) {
-            thread::sleep(Duration::from_secs(5));
-            continue;
-        }
         let target = match find_cs2_window() {
             Ok(Some(target)) => target,
             Ok(None) => {
@@ -689,18 +690,6 @@ fn run_capture_session(
 fn capture_interval_with_headroom(encoded_fps: u16) -> Duration {
     let requested_fps = f64::from(encoded_fps).mul_add(0.25, f64::from(encoded_fps));
     Duration::from_secs_f64(1.0 / requested_fps)
-}
-
-fn hardware_ready(shared: &SharedRecorder) -> bool {
-    let available = nvidia_driver_available();
-    if !available {
-        set_status(
-            shared,
-            RecordingState::Error,
-            "No supported NVIDIA H.264 hardware encoder was detected",
-        );
-    }
-    available
 }
 
 fn find_cs2_window() -> std::result::Result<Option<Window>, windows_capture::window::Error> {
@@ -948,15 +937,6 @@ fn mix_pcm_s16(left: &[u8], right: &[u8]) -> Vec<u8> {
                 .to_le_bytes()
         })
         .collect()
-}
-
-fn nvidia_driver_available() -> bool {
-    std::env::var_os("WINDIR").is_some_and(|windows| {
-        PathBuf::from(windows)
-            .join("System32")
-            .join("nvEncodeAPI64.dll")
-            .is_file()
-    })
 }
 
 fn remove_segments(shared: &SharedRecorder, segments: Vec<ReplaySegment>) {

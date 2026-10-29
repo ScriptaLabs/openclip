@@ -12,6 +12,7 @@ import {
   type AudioDevice,
   type Cs2SetupStatus,
   type RecordingSettings,
+  type RecordingStatus,
 } from "../data/matchRepository";
 import { checkForUpdate, getLaunchAtStartup, installUpdateNow, setLaunchAtStartup, useUpdateStatus, type UpdateStatus } from "../data/updates";
 import { weaponIcon } from "../lib/weapons";
@@ -92,7 +93,7 @@ function updateSummary(status: UpdateStatus): string {
   }
 }
 
-export function SettingsPage() {
+export function SettingsPage({ recordingStatus }: { recordingStatus: RecordingStatus | null }) {
   const [setup, setSetup] = useState<Cs2SetupStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -221,7 +222,7 @@ export function SettingsPage() {
         <div className="oc-sections">
           <section className="oc-card oc-section" id="capture" ref={(node) => { if (node) refs.current.set("capture", node); }}>
             <h2>Capture</h2>
-            <p>How OpenClip records CS2. Hardware encoding runs on your NVIDIA GPU.</p>
+            <p>How OpenClip records CS2. Hardware encoding runs on your graphics card.</p>
             <Setting label="Quality" help="Higher quality uses more disk space per clip.">
               <Segmented disabled={!s} label="Quality" onChange={(quality) => s && save({ ...s, quality })} options={[{ value: "performance", label: "Performance" }, { value: "high", label: "High" }, { value: "ultra", label: "Ultra" }]} value={s?.quality ?? "high"} />
             </Setting>
@@ -232,6 +233,11 @@ export function SettingsPage() {
             </Setting>
             <Setting label="Frame rate" help="Clips are recorded at a steady frame rate.">
               <Segmented disabled={!s} label="Frame rate" onChange={(framesPerSecond) => s && save({ ...s, framesPerSecond })} options={[{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }]} value={s?.framesPerSecond ?? 60} />
+            </Setting>
+            <Setting label="Encoder" help={`Auto uses your graphics card (NVIDIA, Intel, AMD and others) and falls back to the CPU.${recordingStatus?.encoder ? ` Recording with ${recordingStatus.encoder}.` : ""}`}>
+              <select aria-label="Encoder" className="oc-select" disabled={!s} onChange={(event) => s && save({ ...s, videoEncoder: event.target.value as RecordingSettings["videoEncoder"] })} value={s?.videoEncoder ?? "auto"}>
+                <option value="auto">Auto</option><option value="hardware">Graphics card only</option><option value="software">CPU only</option>
+              </select>
             </Setting>
             <Setting label="Game audio" help="Record sound from the CS2 process.">
               <Switch checked={s?.captureGameAudio ?? false} disabled={!s} label="Game audio" onChange={(captureGameAudio) => s && save({ ...s, captureGameAudio })} />

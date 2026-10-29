@@ -37,6 +37,7 @@ export interface RecordingSettings {
   quality: "performance" | "high" | "ultra";
   resolution: "game_resolution" | "p1080" | "p1440";
   framesPerSecond: number;
+  videoEncoder: "auto" | "hardware" | "software";
   replayBufferSeconds: number;
   preRollSeconds: number;
   postRollSeconds: number;
@@ -157,6 +158,7 @@ const browserSettings: RecordingSettings = {
   quality: "high",
   resolution: "game_resolution",
   framesPerSecond: 60,
+  videoEncoder: "auto",
   replayBufferSeconds: 45,
   preRollSeconds: 10,
   postRollSeconds: 5,

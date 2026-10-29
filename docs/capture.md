@@ -24,9 +24,31 @@ CPU memory on the normal path.
 
 The NVIDIA driver DLL and API are loaded at runtime. OpenClip opens a DirectX NVENC session, uses the
 P4 low-latency preset with VBR and no B-frames, and retains that session across every rolling segment.
-Performance, High, and Ultra select bitrate targets. There is no silent software-video fallback and
-AMD/Intel backends are not implemented yet. Clear initialization errors leave the recorder in an
-error state rather than producing a misleading low-performance file.
+Performance, High, and Ultra select bitrate targets. 
+### Encoder selection
+
+The `videoEncoder` setting picks the encoder: `auto` (default), `hardware` or `software`.
+`auto` tries, in order:
+
+1. NVIDIA NVENC (direct D3D11 path above) when `nvEncodeAPI64.dll` is present;
+2. the GPU vendor's hardware Media Foundation H.264 encoder (Intel Quick Sync, AMD AMF and others),
+   found with `MFTEnumEx`;
+3. Windows' built-in software H.264 encoder.
+
+`hardware` skips step 3 and reports an error when no hardware encoder starts. `software` uses only
+step 3 and records at 30 FPS at most. The encoder in use is shown on the Overview status line, and
+every clip records it.
+
+The Media Foundation path (`mf_backend.rs`) copies each captured frame into a CPU-readable staging
+texture, converts BGRA to BT.709 limited-range NV12 (`pixel.rs`), and feeds the transform. It is
+more expensive than NVENC's zero-copy path (a 1080p frame is roughly 8 MB to read back and convert),
+which is why NVENC stays first. Asynchronous (hardware) and synchronous (software) transforms are
+both driven; segment boundaries follow IDR pictures, which are forced every two seconds. Output is
+the same independently playable segments as NVENC, so saving still never re-encodes.
+
+Hardware tests (`cargo test -p openclip-capture mf_backend`) encode synthetic pictures through every
+encoder the machine offers. Only NVIDIA's transform has been exercised on real hardware so far;
+Intel and AMD encoders follow the same Media Foundation contract but need field confirmation.
 
 ## Audio
 

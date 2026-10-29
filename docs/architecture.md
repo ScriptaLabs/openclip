@@ -70,7 +70,8 @@ saturating millisecond arithmetic to make pre-roll safe near match start.
 `RecorderService` supervises the CS2 window lifecycle. Windows Graphics Capture delivers D3D11
 textures with system-relative monotonic timestamps. A narrowly scoped platform module dynamically
 loads NVIDIA's Encode API, registers frame-pool textures once, and feeds one continuous NVENC H.264
-session without mapping pixels into CPU memory. A deterministic pacer maps irregular WGC arrivals
+session without mapping pixels into CPU memory. Other GPUs use a Media Foundation H.264 encoder
+(hardware, then Windows' CPU encoder) behind the same segment interface. A deterministic pacer maps irregular WGC arrivals
 onto exact 30/60 FPS presentation slots. D3D11's video processor handles configured output scaling
 on the GPU.
 
