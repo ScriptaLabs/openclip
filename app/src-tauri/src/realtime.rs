@@ -174,6 +174,22 @@ mod tests {
     }
 
     #[test]
+    fn a_rest_endpoint_url_becomes_the_realtime_socket() {
+        let url = websocket_url(
+            "https://gsgcndvyxyieydsmqfna.supabase.co/rest/v1/update",
+            Some("ANON"),
+        )
+        .expect("valid");
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.host_str(), Some("gsgcndvyxyieydsmqfna.supabase.co"));
+        assert_eq!(url.path(), "/realtime/v1/websocket");
+        assert!(
+            url.query_pairs()
+                .any(|(name, value)| name == "apikey" && value == "ANON")
+        );
+    }
+
+    #[test]
     fn a_project_url_without_a_key_is_rejected() {
         assert!(websocket_url("https://abc.supabase.co", None).is_none());
         assert!(websocket_url("ftp://abc.supabase.co", Some("ANON")).is_none());

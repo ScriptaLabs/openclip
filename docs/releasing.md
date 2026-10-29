@@ -44,9 +44,11 @@ Run `supabase/migrations/20261029000000_update_channel.sql` in the SQL editor. I
 level security, lets anyone **read** releases (the app holds only the public anon key), allows no
 public writes, and turns on realtime for the table.
 
-`SUPABASE_SUBSCRIBE` can be either the realtime websocket URL
-(`wss://<project>.supabase.co/realtime/v1/websocket?apikey=<anon key>`) or the project URL
-(`https://<project>.supabase.co`), in which case also set `SUPABASE_ANON_KEY`.
+`SUPABASE_SUBSCRIBE` can be the realtime websocket URL
+(`wss://<project>.supabase.co/realtime/v1/websocket?apikey=<anon key>`), or any URL on the
+project, such as `https://<project>.supabase.co/rest/v1/update`. Only its host is used. In that
+case also set the `SUPABASE_ANON_KEY` secret to the project's public (anon) key, which the app
+needs to listen for releases. Row level security keeps that key read-only.
 
 ### 2. Backblaze B2
 
