@@ -66,6 +66,20 @@ pub enum MatchMode {
     Unknown,
 }
 
+/// Where a match is being played, as far as the game state reveals. Practice on workshop maps and
+/// community servers produces endless kills nobody wants clipped, so these can be filtered out.
+/// `FACEIT` and matchmaking both report plain official maps and count as `Official`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchOrigin {
+    #[default]
+    Official,
+    /// A workshop or other custom map, such as an aim or prefire trainer.
+    Workshop,
+    /// A community server running its own naming, such as a retake or deathmatch server.
+    Community,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Match {
@@ -73,6 +87,8 @@ pub struct Match {
     pub session_id: GameSessionId,
     pub map: Option<String>,
     pub mode: MatchMode,
+    #[serde(default)]
+    pub origin: MatchOrigin,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub score_team_a: Option<u8>,

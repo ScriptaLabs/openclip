@@ -268,6 +268,12 @@ export function SettingsPage({ recordingStatus }: { recordingStatus: RecordingSt
             <Setting disabled={!s?.captureMultiKills} label="Multi-kill window" help="Kills closer together than this count as one multi-kill. A longer window groups slower double and triple kills.">
               <Segmented disabled={!s || !s.captureMultiKills} label="Multi-kill window" onChange={(multiKillWindowSeconds) => s && save({ ...s, multiKillWindowSeconds })} options={[5, 8, 12, 15].map((value) => ({ value, label: `${value} s` }))} value={s?.multiKillWindowSeconds ?? 8} />
             </Setting>
+            <Setting label="Skip workshop maps" help="No automatic clips on workshop and other custom maps, like aim or prefire trainers. F8 still works.">
+              <Switch checked={s?.skipWorkshopMaps ?? false} disabled={!s} label="Skip workshop maps" onChange={(skipWorkshopMaps) => s && save({ ...s, skipWorkshopMaps })} />
+            </Setting>
+            <Setting label="Skip community servers" help="No automatic clips on community servers, such as retake or deathmatch servers. Matchmaking and FACEIT are always clipped.">
+              <Switch checked={s?.skipCommunityServers ?? false} disabled={!s} label="Skip community servers" onChange={(skipCommunityServers) => s && save({ ...s, skipCommunityServers })} />
+            </Setting>
             <Setting label="Before the kill" help="Footage kept ahead of the first kill.">
               <Segmented disabled={!s} label="Before the kill" onChange={(preRollSeconds) => s && save({ ...s, preRollSeconds })} options={[5, 10, 15].map((value) => ({ value, label: `${value} s` }))} value={s?.preRollSeconds ?? 10} />
             </Setting>

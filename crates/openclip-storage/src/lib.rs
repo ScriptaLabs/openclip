@@ -16,6 +16,7 @@ const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CAPTURED_CLIPS_MIGRATION: &str = include_str!("../migrations/0002_captured_clips.sql");
 const CLIP_ORIGINS_MIGRATION: &str = include_str!("../migrations/0003_clip_origins.sql");
 const RUSH_MODE_MIGRATION: &str = include_str!("../migrations/0004_rush_mode.sql");
+const ORIGIN_MIGRATION: &str = include_str!("../migrations/0005_match_origin.sql");
 
 pub struct SqliteRepository {
     connection: Connection,
@@ -49,9 +50,31 @@ impl SqliteRepository {
     fn migrate(&self) -> openclip_core::Result<()> {
         self.connection
             .execute_batch(&format!(
-                "{INITIAL_MIGRATION}\n{CAPTURED_CLIPS_MIGRATION}\n{CLIP_ORIGINS_MIGRATION}\n{RUSH_MODE_MIGRATION}"
+                "{INITIAL_MIGRATION}
+{CAPTURED_CLIPS_MIGRATION}
+{CLIP_ORIGINS_MIGRATION}
+{RUSH_MODE_MIGRATION}"
             ))
-            .map_err(storage_error)
+            .map_err(storage_error)?;
+        self.add_match_origin_column()
+    }
+
+    /// SQLite cannot add a column only if it is missing, and migrations run on every start.
+    fn add_match_origin_column(&self) -> openclip_core::Result<()> {
+        let present: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('matches') WHERE name = 'origin'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if present == 0 {
+            self.connection
+                .execute_batch(ORIGIN_MIGRATION)
+                .map_err(storage_error)?;
+        }
+        Ok(())
     }
 
     fn load_rounds(&self, match_id: MatchId) -> openclip_core::Result<Vec<Round>> {
@@ -183,7 +206,7 @@ impl MatchRepository for SqliteRepository {
             .connection
             .prepare(
                 "SELECT id, session_id, map, mode, started_at, ended_at, score_team_a,
-                        score_team_b FROM matches ORDER BY started_at DESC",
+                        score_team_b, origin FROM matches ORDER BY started_at DESC",
             )
             .map_err(storage_error)?;
         let rows = statement
@@ -205,7 +228,7 @@ impl MatchRepository for SqliteRepository {
             .connection
             .query_row(
                 "SELECT id, session_id, map, mode, started_at, ended_at, score_team_a,
-                        score_team_b FROM matches WHERE id = ?1",
+                        score_team_b, origin FROM matches WHERE id = ?1",
                 [id.to_string()],
                 map_match_row,
             )
@@ -439,9 +462,10 @@ fn write_match(connection: &Connection, game_match: &Match) -> openclip_core::Re
     connection
         .execute(
             "INSERT INTO matches
-             (id, session_id, map, mode, started_at, ended_at, score_team_a, score_team_b)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             (id, session_id, map, mode, started_at, ended_at, score_team_a, score_team_b, origin)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET map = excluded.map, mode = excluded.mode,
+               origin = excluded.origin,
                ended_at = excluded.ended_at, score_team_a = excluded.score_team_a,
                score_team_b = excluded.score_team_b",
             params![
@@ -453,6 +477,7 @@ fn write_match(connection: &Connection, game_match: &Match) -> openclip_core::Re
                 game_match.ended_at.map(|value| value.to_rfc3339()),
                 game_match.score_team_a,
                 game_match.score_team_b,
+                json_enum(game_match.origin)?,
             ],
         )
         .map_err(storage_error)?;
@@ -511,6 +536,7 @@ fn map_match_row(row: &Row<'_>) -> rusqlite::Result<Match> {
         ended_at: parse_optional_datetime(row.get::<_, Option<String>>(5)?.as_deref())?,
         score_team_a: row.get(6)?,
         score_team_b: row.get(7)?,
+        origin: parse_json_enum(row.get::<_, String>(8)?)?,
         rounds: Vec::new(),
         moments: Vec::new(),
     })
@@ -596,6 +622,57 @@ mod tests {
     }
 
     #[test]
+    fn a_matchs_origin_is_stored_and_old_rows_count_as_official() {
+        let mut repository = SqliteRepository::in_memory().expect("database opens");
+        let session = GameSession {
+            id: GameSessionId::new(),
+            game: Game::CounterStrike2,
+            started_at: timestamp(1_000),
+            ended_at: None,
+        };
+        repository.save_session(&session).expect("session saves");
+        let workshop = Match {
+            id: MatchId::new(),
+            session_id: session.id,
+            map: Some("aim_botz".to_owned()),
+            mode: MatchMode::Unknown,
+            origin: openclip_core::MatchOrigin::Workshop,
+            started_at: timestamp(1_000),
+            ended_at: None,
+            score_team_a: None,
+            score_team_b: None,
+            rounds: Vec::new(),
+            moments: Vec::new(),
+        };
+        repository.save_match(&workshop).expect("match saves");
+        // A row written before the column existed takes the column default.
+        repository
+            .connection
+            .execute(
+                "INSERT INTO matches (id, session_id, map, mode, started_at)
+                 VALUES ('00000000-0000-0000-0000-000000000001', ?1, 'de_mirage', 'competitive', ?2)",
+                rusqlite::params![session.id.to_string(), timestamp(500).to_rfc3339()],
+            )
+            .expect("legacy row inserts");
+        repository.migrate().expect("migrating again is harmless");
+
+        let origins: Vec<_> = repository
+            .list_matches()
+            .expect("matches list")
+            .into_iter()
+            .map(|game_match| (game_match.map, game_match.origin))
+            .collect();
+        assert!(origins.contains(&(
+            Some("aim_botz".to_owned()),
+            openclip_core::MatchOrigin::Workshop
+        )));
+        assert!(origins.contains(&(
+            Some("de_mirage".to_owned()),
+            openclip_core::MatchOrigin::Official
+        )));
+    }
+
+    #[test]
     fn earlier_rush_matches_stored_as_unknown_are_relabelled() {
         let mut repository = SqliteRepository::in_memory().expect("database opens");
         let session = GameSession {
@@ -610,6 +687,7 @@ mod tests {
             session_id: session.id,
             map: Some(map.to_owned()),
             mode: MatchMode::Unknown,
+            origin: openclip_core::MatchOrigin::Official,
             started_at: timestamp(1_000),
             ended_at: None,
             score_team_a: None,
@@ -681,6 +759,7 @@ mod tests {
             session_id: session.id,
             map: Some("de_mirage".to_owned()),
             mode: MatchMode::Competitive,
+            origin: openclip_core::MatchOrigin::Official,
             started_at: timestamp(1_000),
             ended_at: Some(timestamp(2_000)),
             score_team_a: Some(13),

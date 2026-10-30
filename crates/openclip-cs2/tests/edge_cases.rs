@@ -188,3 +188,21 @@ fn an_unlisted_mode_still_records_the_match() {
     assert_eq!(count(&started, GameEventType::MatchStart), 1);
     assert_eq!(started.matches[0].mode, openclip_core::MatchMode::Unknown);
 }
+
+#[test]
+fn matches_are_labelled_by_where_they_are_played() {
+    let origin_of = |name: &str| {
+        let mut adapter = Cs2Adapter::default();
+        let started = feed(&mut adapter, &payload(100, name, 0, 0));
+        started.matches[0].origin
+    };
+    assert_eq!(origin_of("de_mirage"), openclip_core::MatchOrigin::Official);
+    assert_eq!(
+        origin_of("workshop/3070923343/aim_botz"),
+        openclip_core::MatchOrigin::Workshop
+    );
+    assert_eq!(
+        origin_of("DE_MIRAGE | RETAKE #61 | TR | XPLAY.GG"),
+        openclip_core::MatchOrigin::Community
+    );
+}

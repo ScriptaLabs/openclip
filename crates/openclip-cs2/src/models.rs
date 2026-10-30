@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use openclip_core::MatchId;
+use openclip_core::{MatchId, MatchOrigin};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 
 /// Community and FACEIT-style servers report names like `DE_MIRAGE | RETAKE #61 | TR | XPLAY.GG`
@@ -18,6 +18,45 @@ pub fn normalize_map_name(raw: &str) -> String {
     }
     let first = lower.split('|').next().unwrap_or_default().trim();
     first.rsplit('/').next().unwrap_or(first).trim().to_owned()
+}
+
+/// Name prefixes of the maps Valve ships. Matchmaking, `FACEIT` and most community servers all use
+/// these, so a map without one is a custom map.
+const OFFICIAL_MAP_PREFIXES: [&str; 6] = ["de_", "cs_", "ar_", "dz_", "gd_", "rush_"];
+
+/// Works out where a match is played from the map name the game reports.
+///
+/// The game state never says which server it is, so this reads what servers leave behind:
+/// - `workshop/<id>/<map>` is a workshop map;
+/// - a name with extras such as `DE_MIRAGE | RETAKE #61 | TR` was renamed by a community server;
+/// - a plain name without an official prefix (`aim_botz`) is a custom map.
+///
+/// Matchmaking and `FACEIT` report a plain official name and are `Official`. A community server
+/// that keeps a plain official name and mode looks the same as matchmaking and cannot be told apart.
+#[must_use]
+pub fn classify_origin(raw: &str) -> MatchOrigin {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        // No name to judge by, so nothing is hidden.
+        return MatchOrigin::Official;
+    }
+    if lower.starts_with("workshop/") || lower.starts_with("workshop\\") {
+        return MatchOrigin::Workshop;
+    }
+    let plain = lower
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if !plain {
+        return MatchOrigin::Community;
+    }
+    if OFFICIAL_MAP_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        MatchOrigin::Official
+    } else {
+        MatchOrigin::Workshop
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -291,7 +330,34 @@ mod tests {
 
 #[cfg(test)]
 mod map_name_tests {
-    use super::normalize_map_name;
+    use openclip_core::MatchOrigin;
+
+    use super::{classify_origin, normalize_map_name};
+
+    #[test]
+    fn workshop_and_community_maps_are_told_apart_from_official_ones() {
+        assert_eq!(classify_origin("de_mirage"), MatchOrigin::Official);
+        assert_eq!(classify_origin("cs_office"), MatchOrigin::Official);
+        assert_eq!(classify_origin("rush_001"), MatchOrigin::Official);
+        assert_eq!(
+            classify_origin("workshop/3070923343/de_test"),
+            MatchOrigin::Workshop
+        );
+        assert_eq!(
+            classify_origin("workshop/123/aim_botz"),
+            MatchOrigin::Workshop
+        );
+        assert_eq!(classify_origin("aim_botz"), MatchOrigin::Workshop);
+        assert_eq!(
+            classify_origin("DE_MIRAGE | RETAKE #61 | TR | XPLAY.GG"),
+            MatchOrigin::Community
+        );
+        assert_eq!(
+            classify_origin("Aim Botz | 128 tick"),
+            MatchOrigin::Community
+        );
+        assert_eq!(classify_origin(""), MatchOrigin::Official);
+    }
 
     #[test]
     fn server_style_names_reduce_to_the_engine_map() {

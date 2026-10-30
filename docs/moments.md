@@ -109,3 +109,32 @@ previews. Overlays cannot draw over exclusive fullscreen; CS2 must run borderles
 
 `npm run dev` with `?overlay=captured|partial|failed` (optionally `&clip=<url>&side=right`)
 previews the overlay in a browser.
+
+## Workshop maps and community servers
+
+Practice on a workshop map (an aim trainer, a prefire map) can produce hundreds of kills an hour.
+Two settings, both on by default, keep those out of the automatic clips:
+
+- **Skip workshop maps** for workshop and other custom maps.
+- **Skip community servers** for community servers.
+
+Each match is labelled when it starts (`MatchOrigin`: `official`, `workshop` or `community`), and the
+moment engine drops the events of any match whose origin is currently skipped. The setting applies
+immediately, including to a match already running. F8 is never filtered, and the match is still
+recorded so it can be opened from the Matches page if it did produce a clip. Matches of a skipped
+origin that produced nothing are hidden from the list.
+
+The game state does not say which server it is, so the label is read from the map name
+(`classify_origin` in `openclip-cs2`):
+
+| Map name the game reports | Label |
+| --- | --- |
+| `workshop/<id>/<map>` | workshop |
+| a plain name without an official prefix, such as `aim_botz` | workshop |
+| a name with extras, such as `DE_MIRAGE \| RETAKE #61 \| TR` | community |
+| a plain `de_`, `cs_`, `ar_`, `dz_`, `gd_` or `rush_` name | official |
+
+Matchmaking and FACEIT report plain official names, so they are never filtered. The catch: a
+community server that keeps a plain official map name looks exactly like matchmaking and cannot be
+told apart, so it is clipped. Origins are stored in the `origin` column of `matches` (added by the
+storage crate when missing; older matches count as official).

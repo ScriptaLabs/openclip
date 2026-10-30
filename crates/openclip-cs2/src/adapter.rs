@@ -6,7 +6,7 @@ use openclip_core::{
 use serde_json::{Map, Value, json};
 use tracing::{debug, info, warn};
 
-use crate::models::{GsiMap, GsiPayload, MapPhase, RoundPhase};
+use crate::models::{GsiMap, GsiPayload, MapPhase, RoundPhase, classify_origin};
 
 #[derive(Debug, Default)]
 pub struct Cs2Adapter {
@@ -183,6 +183,9 @@ impl Cs2Adapter {
             session_id,
             map: payload.normalized_map_name(),
             mode,
+            origin: payload
+                .map_name()
+                .map_or_else(Default::default, classify_origin),
             started_at: timestamp,
             ended_at: None,
             score_team_a: map.and_then(ct_score),

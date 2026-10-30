@@ -115,6 +115,7 @@ fn moment_worker(
         match command {
             Command::Settings(settings) => engine.update_settings(&settings),
             Command::Update(update) => {
+                engine.observe_matches(&update.matches);
                 let now_ms = recorder.timeline_now_ms();
                 for job in engine.ingest(update.events, now_ms) {
                     send_finalize(finalize_sender, job);

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::MatchOrigin;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingQuality {
@@ -69,6 +71,12 @@ pub struct Settings {
     pub capture_kills: bool,
     pub capture_headshots: bool,
     pub capture_multi_kills: bool,
+    /// Do not create automatic clips on workshop or other custom maps.
+    #[serde(default = "default_true")]
+    pub skip_workshop_maps: bool,
+    /// Do not create automatic clips on community servers. Matchmaking and `FACEIT` are unaffected.
+    #[serde(default = "default_true")]
+    pub skip_community_servers: bool,
     /// How long after a kill another kill still joins the same multi-kill, in seconds. It is
     /// independent of the post-roll, which only decides how much footage follows the last kill.
     #[serde(default = "default_multi_kill_window")]
@@ -103,6 +111,18 @@ pub struct Settings {
     pub close_to_tray: bool,
 }
 
+impl Settings {
+    /// Whether automatic clips are turned off for matches of this origin.
+    #[must_use]
+    pub const fn skips(&self, origin: MatchOrigin) -> bool {
+        match origin {
+            MatchOrigin::Official => false,
+            MatchOrigin::Workshop => self.skip_workshop_maps,
+            MatchOrigin::Community => self.skip_community_servers,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -116,6 +136,8 @@ impl Default for Settings {
             capture_kills: true,
             capture_headshots: true,
             capture_multi_kills: true,
+            skip_workshop_maps: true,
+            skip_community_servers: true,
             multi_kill_window_seconds: default_multi_kill_window(),
             capture_game_audio: true,
             capture_microphone: false,
@@ -184,6 +206,9 @@ mod tests {
         assert_eq!(settings.sound_volume, 60);
         assert_eq!(settings.multi_kill_window_seconds, 8);
         assert_eq!(settings.video_encoder, super::VideoEncoderPreference::Auto);
+        assert!(settings.skip_workshop_maps && settings.skip_community_servers);
+        assert!(settings.skips(super::MatchOrigin::Workshop));
+        assert!(!settings.skips(super::MatchOrigin::Official));
         assert!(settings.auto_update);
         assert!(settings.close_to_tray);
     }

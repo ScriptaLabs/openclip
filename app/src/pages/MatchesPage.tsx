@@ -4,7 +4,7 @@ import { matchWhen } from "../components/MatchSections";
 import { dayLabel, type ClipEntry } from "../data/clips";
 import { artworkForMap } from "../data/mapArtwork";
 import { buildMatchSummary, type MatchSummary } from "../data/overview";
-import { formatMode, type MatchRecord } from "../domain";
+import { formatMode, originLabel, type MatchRecord } from "../domain";
 import { mapLabel } from "../lib/maps";
 
 interface MatchesPageProps {
@@ -31,7 +31,7 @@ function MatchCard({ summary, onOpen }: { summary: MatchSummary; onOpen: () => v
         <ArrowUpRight className="oc-match-arrow" size={18} />
       </div>
       <div className="oc-match-body">
-        <span className="oc-match-when">{formatMode(match.mode)} · {matchWhen(match)}</span>
+        <span className="oc-match-when">{[originLabel(match.origin) ?? formatMode(match.mode), matchWhen(match)].join(" · ")}</span>
         {summary.rounds.length > 0 && (
           <div aria-hidden="true" className="oc-mini-bars" style={{ gridTemplateColumns: `repeat(${summary.rounds.length}, minmax(0, 1fr))` }}>
             {summary.rounds.map((round) => (
@@ -53,16 +53,25 @@ function MatchCard({ summary, onOpen }: { summary: MatchSummary; onOpen: () => v
   );
 }
 
+/** A workshop or community session that produced nothing to watch is noise, not a match. */
+function isEmptyPractice(match: MatchRecord, clips: ClipEntry[]): boolean {
+  if (!match.origin || match.origin === "official") return false;
+  return match.moments.length === 0 && !clips.some((clip) => clip.matchId === match.id);
+}
+
 export function MatchesPage({ matches, clips, error, onOpenMatch }: MatchesPageProps) {
   const groups = useMemo(() => {
     const sorted = [...matches].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
     const byDay = new Map<string, MatchSummary[]>();
     for (const match of sorted) {
+      if (isEmptyPractice(match, clips)) continue;
       const label = dayLabel(new Date(match.startedAt).getTime());
       byDay.set(label, [...(byDay.get(label) ?? []), buildMatchSummary(match, clips)]);
     }
     return [...byDay.entries()];
   }, [clips, matches]);
+
+  const shown = groups.reduce((total, [, summaries]) => total + summaries.length, 0);
 
   return (
     <div className="oc-page">
@@ -71,11 +80,11 @@ export function MatchesPage({ matches, clips, error, onOpenMatch }: MatchesPageP
           <h1>Matches</h1>
           <p>Every game OpenClip followed, with the moments it saved.</p>
         </div>
-        <span className="oc-count"><strong>{matches.length}</strong> {matches.length === 1 ? "match" : "matches"}</span>
+        <span className="oc-count"><strong>{shown}</strong> {shown === 1 ? "match" : "matches"}</span>
       </header>
 
       {error && <div className="oc-error" role="alert">Couldn’t load matches: {error}</div>}
-      {!error && matches.length === 0 && (
+      {!error && shown === 0 && (
         <div className="oc-empty">
           <strong>No matches yet</strong>
           <span>Start Counter-Strike 2 with GSI configured. Matches appear here as you play.</span>

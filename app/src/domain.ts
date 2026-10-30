@@ -1,4 +1,5 @@
 export type Game = "counter_strike2";
+export type MatchOrigin = "official" | "workshop" | "community";
 export type MatchMode = "competitive" | "premier" | "casual" | "deathmatch" | "rush" | "unknown";
 export type GameEventType =
   | "match_start"
@@ -65,6 +66,8 @@ export interface MatchRecord {
   sessionId: string;
   map: string | null;
   mode: MatchMode;
+  /** Where it was played. Older fixtures and saved matches count as official. */
+  origin?: MatchOrigin;
   startedAt: string;
   endedAt: string | null;
   scoreTeamA: number | null;
@@ -87,6 +90,13 @@ export function getMatchStats(match: MatchRecord): MatchStats {
     headshots: events.filter((event) => event.eventType === "headshot").length,
     highlights: match.moments.length,
   };
+}
+
+/** "Workshop map" or "Community server" for matches played outside matchmaking. */
+export function originLabel(origin: MatchOrigin | undefined): string | null {
+  if (origin === "workshop") return "Workshop map";
+  if (origin === "community") return "Community server";
+  return null;
 }
 
 export function formatMode(mode: MatchMode): string {

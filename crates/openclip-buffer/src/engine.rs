@@ -6,10 +6,12 @@
 //! requested capture range therefore agree, and kills in one tick keep a stable relative order.
 //! The caller supplies `now_ms`, so the whole pipeline is deterministic under test.
 
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use openclip_core::{
-    GameEvent, GameEventType, MatchId, Moment, MomentDetector, MomentId, Settings,
+    GameEvent, GameEventType, Match, MatchId, MatchOrigin, Moment, MomentDetector, MomentId,
+    Settings,
 };
 
 use crate::WindowedMomentDetector;
@@ -37,6 +39,10 @@ pub struct MomentEngine {
     pre_roll_ms: u64,
     anchor: Option<(MatchId, u64)>,
     active_range: Option<ActiveRange>,
+    /// Where each observed match is played, to leave workshop and community matches out.
+    origins: HashMap<MatchId, MatchOrigin>,
+    skip_workshop_maps: bool,
+    skip_community_servers: bool,
 }
 
 impl MomentEngine {
@@ -47,10 +53,30 @@ impl MomentEngine {
             pre_roll_ms: u64::from(settings.pre_roll_seconds) * 1_000,
             anchor: None,
             active_range: None,
+            origins: HashMap::new(),
+            skip_workshop_maps: settings.skip_workshop_maps,
+            skip_community_servers: settings.skip_community_servers,
+        }
+    }
+
+    /// Learns where matches are played. Call it with each update's matches before `ingest`.
+    pub fn observe_matches(&mut self, matches: &[Match]) {
+        for game_match in matches {
+            self.origins.insert(game_match.id, game_match.origin);
+        }
+    }
+
+    fn skips(&self, match_id: MatchId) -> bool {
+        match self.origins.get(&match_id) {
+            Some(MatchOrigin::Workshop) => self.skip_workshop_maps,
+            Some(MatchOrigin::Community) => self.skip_community_servers,
+            Some(MatchOrigin::Official) | None => false,
         }
     }
 
     pub fn update_settings(&mut self, settings: &Settings) {
+        self.skip_workshop_maps = settings.skip_workshop_maps;
+        self.skip_community_servers = settings.skip_community_servers;
         self.detector.update_settings(settings);
         self.pre_roll_ms = u64::from(settings.pre_roll_seconds) * 1_000;
     }
@@ -65,6 +91,9 @@ impl MomentEngine {
     pub fn ingest(&mut self, events: Vec<GameEvent>, now_ms: u64) -> Vec<CaptureJob> {
         let mut jobs = Vec::new();
         for mut event in events {
+            if self.skips(event.match_id) {
+                continue;
+            }
             self.retime(&mut event, now_ms);
             let before_id = self.detector.active().map(|moment| moment.id);
             let before_events = self
@@ -192,6 +221,66 @@ mod tests {
             match_offset_ms: Some(0),
             metadata: json!({}),
         }
+    }
+
+    fn match_of(id: MatchId, origin: MatchOrigin) -> Match {
+        Match {
+            id,
+            session_id: openclip_core::GameSessionId::new(),
+            map: None,
+            mode: openclip_core::MatchMode::Competitive,
+            origin,
+            started_at: Utc::now(),
+            ended_at: None,
+            score_team_a: None,
+            score_team_b: None,
+            rounds: Vec::new(),
+            moments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn workshop_and_community_matches_make_no_moments_while_filtered() {
+        for origin in [MatchOrigin::Workshop, MatchOrigin::Community] {
+            let match_id = MatchId::new();
+            let mut engine = MomentEngine::new(&settings());
+            engine.observe_matches(&[match_of(match_id, origin)]);
+            engine.ingest(vec![event(match_id, None, GameEventType::Kill)], 30_000);
+            assert_eq!(engine.next_deadline_ms(), None, "{origin:?} is skipped");
+        }
+    }
+
+    #[test]
+    fn official_matches_and_unfiltered_origins_still_record() {
+        let official = MatchId::new();
+        let mut engine = MomentEngine::new(&settings());
+        engine.observe_matches(&[match_of(official, MatchOrigin::Official)]);
+        engine.ingest(vec![event(official, None, GameEventType::Kill)], 30_000);
+        assert!(engine.next_deadline_ms().is_some());
+
+        let workshop = MatchId::new();
+        let allowing = Settings {
+            skip_workshop_maps: false,
+            ..settings()
+        };
+        let mut engine = MomentEngine::new(&allowing);
+        engine.observe_matches(&[match_of(workshop, MatchOrigin::Workshop)]);
+        engine.ingest(vec![event(workshop, None, GameEventType::Kill)], 30_000);
+        assert!(engine.next_deadline_ms().is_some());
+    }
+
+    #[test]
+    fn turning_the_filter_on_applies_to_the_running_match() {
+        let match_id = MatchId::new();
+        let allowing = Settings {
+            skip_community_servers: false,
+            ..settings()
+        };
+        let mut engine = MomentEngine::new(&allowing);
+        engine.observe_matches(&[match_of(match_id, MatchOrigin::Community)]);
+        engine.update_settings(&settings());
+        engine.ingest(vec![event(match_id, None, GameEventType::Kill)], 30_000);
+        assert_eq!(engine.next_deadline_ms(), None);
     }
 
     #[test]
