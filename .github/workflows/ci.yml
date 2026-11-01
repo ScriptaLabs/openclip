@@ -14,7 +14,7 @@ jobs:
   rust:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # ffmpeg.exe is stored in Git LFS. Checks only need the file to exist, and fetching the
           # real binary on every run would burn the LFS bandwidth quota.
@@ -33,10 +33,10 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           lfs: false
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
