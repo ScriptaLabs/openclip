@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use openclip_core::{Moment, OverlayPosition, Settings};
+use openclip_core::{Clip, Moment, OverlayPosition, Settings};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
@@ -33,6 +33,10 @@ struct OverlayPayload<'a> {
     post_roll_seconds: u16,
     sounds_enabled: bool,
     sound_volume: u8,
+    /// A clip saved with the replay shortcut rather than detected from the game.
+    manual: bool,
+    /// Why a manual save failed.
+    note: Option<&'a str>,
 }
 
 /// Creates the hidden overlay window. Failure is non-fatal: capture works without it.
@@ -67,6 +71,54 @@ pub(crate) fn create(app: &AppHandle) {
 
 /// Shows the overlay for a finalized moment, honouring the user's settings.
 pub(crate) fn present(app: &AppHandle, settings: &Settings, result: &AutomaticMomentResult) {
+    show(app, settings, result, false, None);
+}
+
+/// Confirms (or explains the failure of) a save made with the replay shortcut. Without it the key
+/// press gives no sign at all while the game is in front.
+pub(crate) fn present_manual(app: &AppHandle, settings: &Settings, outcome: &Result<Clip, String>) {
+    use openclip_core::{MatchId, MomentClassification, MomentId};
+
+    let (clip, error) = match outcome {
+        Ok(clip) => (Some(clip), None),
+        Err(error) => (None, Some(error.as_str())),
+    };
+    let status = if clip.is_some() {
+        CaptureStatus::Captured
+    } else {
+        CaptureStatus::Failed
+    };
+    let result = AutomaticMomentResult {
+        moment: Moment {
+            id: MomentId::new(),
+            match_id: clip
+                .and_then(|clip| clip.match_id)
+                .unwrap_or_else(MatchId::new),
+            round_id: None,
+            start_offset_ms: 0,
+            end_offset_ms: clip.map_or(0, |clip| clip.duration_ms),
+            events: Vec::new(),
+            classification: MomentClassification::Other,
+            importance: 0.0,
+            clip_id: clip.map(|clip| clip.id),
+            clip_path: clip.map(|clip| clip.path.clone()),
+            is_favorite: false,
+        },
+        captured: clip.is_some(),
+        status,
+        missing_ms: 0,
+        error: error.map(str::to_owned),
+    };
+    show(app, settings, &result, true, error);
+}
+
+fn show(
+    app: &AppHandle,
+    settings: &Settings,
+    result: &AutomaticMomentResult,
+    manual: bool,
+    note: Option<&str>,
+) {
     if !settings.show_clip_notifications {
         return;
     }
@@ -107,6 +159,8 @@ pub(crate) fn present(app: &AppHandle, settings: &Settings, result: &AutomaticMo
         post_roll_seconds: settings.post_roll_seconds,
         sounds_enabled: settings.sounds_enabled,
         sound_volume: settings.sound_volume.min(100),
+        manual,
+        note,
     };
     if let Err(error) = app.emit_to(OVERLAY_LABEL, "overlay_show", payload) {
         tracing::warn!(%error, "overlay event could not be delivered");

@@ -940,6 +940,34 @@ fn emit_game_updates(app: &tauri::AppHandle, update: &GameStateUpdate) {
     }
 }
 
+/// Saves the replay buffer when the shortcut is pressed and shows the result in the overlay.
+fn on_manual_replay_shortcut(app: tauri::AppHandle, shortcut: String) {
+    tracing::info!(%shortcut, "manual replay shortcut pressed");
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let outcome = save_and_persist_replay(&state);
+        let settings = state
+            .repository
+            .lock()
+            .ok()
+            .and_then(|repository| repository.load_settings().ok());
+        if let Some(settings) = settings {
+            overlay::present_manual(&app, &settings, &outcome);
+        }
+        match outcome {
+            Ok(clip) => {
+                tracing::info!(path = %clip.path.display(), %shortcut, "manual replay save completed");
+                if let Err(error) = app.emit("replay_saved", clip) {
+                    tracing::warn!(%error, "could not emit replay saved event");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, %shortcut, "manual replay save was not available");
+            }
+        }
+    });
+}
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
@@ -1001,25 +1029,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         tauri_plugin_global_shortcut::Builder::new()
             .with_shortcuts([settings.manual_replay_shortcut.as_str()])?
             .with_handler(|app, shortcut, event| {
-                if event.state != ShortcutState::Pressed {
-                    return;
+                if event.state == ShortcutState::Pressed {
+                    on_manual_replay_shortcut(app.clone(), format!("{shortcut:?}"));
                 }
-                let app = app.clone();
-                let shortcut = format!("{shortcut:?}");
-                tauri::async_runtime::spawn_blocking(move || {
-                    let state = app.state::<AppState>();
-                    match save_and_persist_replay(&state) {
-                        Ok(clip) => {
-                            tracing::info!(path = %clip.path.display(), %shortcut, "manual replay save completed");
-                            if let Err(error) = app.emit("replay_saved", clip) {
-                                tracing::warn!(%error, "could not emit replay saved event");
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, %shortcut, "manual replay save was not available");
-                        }
-                    }
-                });
             })
             .build(),
     )?;

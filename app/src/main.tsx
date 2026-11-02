@@ -16,7 +16,8 @@ if (!root) {
 // The overlay window loads this same bundle; it is told apart by its window label.
 const isOverlayWindow = isTauri() && getCurrentWindow().label === "overlay";
 
-// `npm run dev` with `?overlay=captured|partial|failed` previews the overlay in a browser.
+// `npm run dev` with `?overlay=captured|partial|failed` previews the overlay in a browser; add
+// `&manual=1` for the card shown after the replay shortcut.
 function overlayDemo(): OverlayPayload | undefined {
   const params = new URLSearchParams(window.location.search);
   const status = params.get("overlay");
@@ -26,11 +27,12 @@ function overlayDemo(): OverlayPayload | undefined {
     eventType: "kill" as const, occurredAt: new Date().toISOString(), matchOffsetMs: 0,
     metadata: { weapon, headshot },
   });
+  const manual = params.get("manual") === "1";
   return {
     moment: {
       id: "demo-moment",
-      classification: "quad_kill",
-      events: [kill("weapon_ak47", true), kill("weapon_ak47", false), kill("weapon_ak47", true), kill("weapon_ak47", false)],
+      classification: manual ? "other" : "quad_kill",
+      events: manual ? [] : [kill("weapon_ak47", true), kill("weapon_ak47", false), kill("weapon_ak47", true), kill("weapon_ak47", false)],
       clipPath: params.get("clip"),
     },
     status,
@@ -40,6 +42,8 @@ function overlayDemo(): OverlayPayload | undefined {
     postRollSeconds: 5,
     soundsEnabled: false,
     soundVolume: 0,
+    manual,
+    note: manual && status === "failed" ? "no active replay buffer; launch CS2 and wait for Replay active" : null,
   };
 }
 

@@ -19,6 +19,10 @@ export interface OverlayPayload {
   postRollSeconds: number;
   soundsEnabled: boolean;
   soundVolume: number;
+  /** Saved with the replay shortcut, not detected from the game. */
+  manual?: boolean;
+  /** Why a manual save failed. */
+  note?: string | null;
 }
 
 type Phase = "enter" | "exit";
@@ -40,7 +44,13 @@ const statusCopy: Record<CaptureStatus, string> = {
   failed: "Couldn't capture this moment",
 };
 
+function titleOf(payload: OverlayPayload): string {
+  if (!payload.manual) return momentTitle(payload.moment);
+  return payload.status === "failed" ? "Replay not saved" : "Replay saved";
+}
+
 function detail(payload: OverlayPayload): string {
+  if (payload.manual) return payload.status === "failed" ? payload.note ?? "" : "Last 16 seconds";
   const kills = killCount(payload.moment);
   const parts: string[] = [];
   if (kills > 1) parts.push(`${kills} kills`);
@@ -192,8 +202,8 @@ export default function OverlayApp({ demo }: OverlayAppProps) {
         <header className="ov-head">
           <span className="ov-logo"><BrandMark /></span>
           <div className="ov-text">
-            <span className="ov-status"><i><StatusIcon size={11} strokeWidth={3} /></i>{statusCopy[item.status]}</span>
-            <strong>{momentTitle(item.moment)}</strong>
+            <span className="ov-status"><i><StatusIcon size={11} strokeWidth={3} /></i>{item.manual ? (item.status === "failed" ? "Couldn't save" : "Manual clip") : statusCopy[item.status]}</span>
+            <strong>{titleOf(item)}</strong>
             {subtitle && <small>{subtitle}</small>}
           </div>
         </header>
