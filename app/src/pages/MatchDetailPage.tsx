@@ -77,10 +77,10 @@ export function MatchDetailPage({ match, clips, onBack, onOpenClip }: MatchDetai
       <section>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "0 2px 16px" }}>
           <h2 className="oc-h2">Clips from this match</h2>
-          <span className="oc-sub" style={{ margin: 0 }}>{summary.clips.length} {summary.clips.length === 1 ? "moment" : "moments"}</span>
+          <span className="oc-sub" style={{ margin: 0 }}>{summary.clips.length} {summary.clips.length === 1 ? "clip" : "clips"}</span>
         </div>
         {summary.clips.length === 0 ? (
-          <div className="oc-empty"><strong>No moments yet</strong><span>Kills, multi-kills and headshots from this match will appear here.</span></div>
+          <div className="oc-empty"><strong>No clips yet</strong><span>Kills, multi-kills and headshots from this match, and replays you save, will appear here.</span></div>
         ) : (
           <div className="oc-clip-grid">
             {summary.clips.map((clip) => <ClipCard clip={clip} key={clip.id} onOpen={onOpenClip} />)}

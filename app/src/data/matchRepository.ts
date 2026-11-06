@@ -2,6 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { MatchRecord, Moment } from "../domain";
 import { momentTitle } from "../domain";
 import { developmentMatches } from "./developmentFixtures";
+import type { ManualClipRecord } from "./clips";
 
 type PersistedMatch = Omit<MatchRecord, "thumbnailTone" | "moments"> & {
   moments: Array<Omit<Moment, "title" | "weapon" | "thumbnailTone">>;
@@ -122,6 +123,13 @@ class FixtureMatchRepository implements MatchRepository {
 export const matchRepository: MatchRepository = isTauri()
   ? new TauriMatchRepository()
   : new FixtureMatchRepository();
+
+/** Replays saved with the shortcut, newest first. Empty in the browser preview. */
+export async function getManualClips(): Promise<ManualClipRecord[]> {
+  if (!isTauri()) return [];
+  const clips = await invoke<ManualClipRecord[]>("get_clips");
+  return clips.filter((clip) => clip.source === "manual");
+}
 
 export async function getCs2Status(): Promise<Cs2Status> {
   if (!isTauri()) {

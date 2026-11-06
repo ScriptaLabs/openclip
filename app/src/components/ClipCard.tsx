@@ -21,7 +21,7 @@ export function useClipMedia(clip: ClipEntry) {
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
-        void loadClipMedia(clip.matchId, clip.id).then((urls) => { if (active) setMedia(urls); });
+        void loadClipMedia(clip).then((urls) => { if (active) setMedia(urls); });
       },
       { rootMargin: "240px" },
     );
@@ -30,7 +30,7 @@ export function useClipMedia(clip: ClipEntry) {
       active = false;
       observer.disconnect();
     };
-  }, [clip.matchId, clip.id, clip.hasClip]);
+  }, [clip.matchId, clip.id, clip.source, clip.hasClip]);
 
   return { ref, media };
 }

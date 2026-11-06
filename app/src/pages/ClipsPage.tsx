@@ -3,7 +3,7 @@ import { ChevronDown, Search } from "lucide-react";
 import { ClipCard } from "../components/ClipCard";
 import { dayLabel, type ClipEntry } from "../data/clips";
 
-type Filter = "all" | "multi" | "headshots" | "favorites";
+type Filter = "all" | "multi" | "headshots" | "favorites" | "manual";
 type Sort = "newest" | "best";
 
 interface ClipsPageProps {
@@ -17,6 +17,7 @@ const filters: Array<{ id: Filter; label: string; test: (clip: ClipEntry) => boo
   { id: "multi", label: "Multi-kills", test: (clip) => clip.kills.length >= 2 },
   { id: "headshots", label: "Headshots", test: (clip) => clip.headshots > 0 },
   { id: "favorites", label: "Favorites", test: (clip) => clip.favorite },
+  { id: "manual", label: "Manual", test: (clip) => clip.source === "manual" },
 ];
 
 export function ClipsPage({ clips, error, onOpenClip }: ClipsPageProps) {
@@ -54,7 +55,7 @@ export function ClipsPage({ clips, error, onOpenClip }: ClipsPageProps) {
       <header className="oc-head">
         <div>
           <h1>Clips</h1>
-          <p>Saved automatically as you play.</p>
+          <p>Saved automatically as you play, plus the replays you save yourself.</p>
         </div>
         <div className="oc-actions">
           <label className="oc-field search">

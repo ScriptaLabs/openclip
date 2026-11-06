@@ -5,6 +5,13 @@ export interface ClipMediaUrls {
   thumbnailUrl: string | null;
 }
 
+/** What identifies a clip to the desktop host. */
+export interface ClipKey {
+  id: string;
+  matchId: string;
+  source: "automatic" | "manual";
+}
+
 const none: ClipMediaUrls = { clipUrl: null, thumbnailUrl: null };
 const cache = new Map<string, Promise<ClipMediaUrls>>();
 
@@ -28,15 +35,17 @@ async function limited<T>(task: () => Promise<T>): Promise<T> {
  * Asks the desktop host to grant the webview read access to one clip and its thumbnail
  * (generating the thumbnail if needed), then turns the paths into asset URLs.
  */
-export function loadClipMedia(matchId: string, momentId: string): Promise<ClipMediaUrls> {
+export function loadClipMedia(clip: ClipKey): Promise<ClipMediaUrls> {
   if (!isTauri()) return Promise.resolve(none);
-  const key = `${matchId}:${momentId}`;
+  const key = `${clip.source}:${clip.matchId}:${clip.id}`;
   const cached = cache.get(key);
   if (cached) return cached;
-  const request = limited(() => invoke<{ clipPath: string; thumbnailPath: string | null }>("prepare_clip_media", {
-    matchId,
-    momentId,
-  }))
+  const request = limited(() => (clip.source === "manual"
+    ? invoke<{ clipPath: string; thumbnailPath: string | null }>("prepare_manual_clip_media", { clipId: clip.id })
+    : invoke<{ clipPath: string; thumbnailPath: string | null }>("prepare_clip_media", {
+      matchId: clip.matchId,
+      momentId: clip.id,
+    })))
     .then((media) => ({
       clipUrl: convertFileSrc(media.clipPath),
       thumbnailUrl: media.thumbnailPath ? convertFileSrc(media.thumbnailPath) : null,
@@ -55,6 +64,8 @@ export async function setMomentFavorite(matchId: string, momentId: string, favor
   if (isTauri()) await invoke("set_moment_favorite", { matchId, momentId, favorite });
 }
 
-export async function revealMomentClip(matchId: string, momentId: string): Promise<void> {
-  if (isTauri()) await invoke("reveal_moment_clip", { matchId, momentId });
+export async function revealClip(clip: ClipKey): Promise<void> {
+  if (!isTauri()) return;
+  if (clip.source === "manual") await invoke("reveal_manual_clip", { clipId: clip.id });
+  else await invoke("reveal_moment_clip", { matchId: clip.matchId, momentId: clip.id });
 }

@@ -11,8 +11,20 @@ export interface KillMark {
   atMs: number;
 }
 
+/** A replay saved with the shortcut. It has no moment, so it is keyed by its clip record. */
+export interface ManualClipRecord {
+  id: string;
+  matchId: string | null;
+  source: "manual" | "automatic_moment";
+  createdAt: string;
+  path: string;
+  durationMs: number;
+}
+
 export interface ClipEntry {
   id: string;
+  /** `manual` entries are replays saved with the shortcut; they are keyed by clip, not moment. */
+  source: "automatic" | "manual";
   matchId: string;
   moment: Moment;
   match: Pick<MatchRecord, "map" | "mode" | "scoreTeamA" | "scoreTeamB" | "startedAt" | "endedAt">;
@@ -65,8 +77,58 @@ function dominantRaw(kills: KillMark[]): string | null {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 }
 
-export function buildClips(matches: MatchRecord[]): ClipEntry[] {
+function manualEntry(clip: ManualClipRecord, match: MatchRecord | undefined): ClipEntry {
+  const at = new Date(clip.createdAt).getTime();
+  const moment: Moment = {
+    id: clip.id,
+    matchId: clip.matchId ?? "",
+    roundId: null,
+    startOffsetMs: 0,
+    endOffsetMs: clip.durationMs,
+    events: [],
+    classification: "other",
+    importance: 0,
+    clipId: clip.id,
+    clipPath: clip.path,
+    isFavorite: false,
+    title: "Manual clip",
+    weapon: "",
+    thumbnailTone: "cyan",
+  };
+  return {
+    id: clip.id,
+    source: "manual",
+    matchId: clip.matchId ?? "",
+    moment,
+    match: match
+      ? {
+        map: match.map, mode: match.mode, scoreTeamA: match.scoreTeamA, scoreTeamB: match.scoreTeamB,
+        startedAt: match.startedAt, endedAt: match.endedAt,
+      }
+      : { map: null, mode: "unknown", scoreTeamA: null, scoreTeamB: null, startedAt: clip.createdAt, endedAt: null },
+    mapName: match ? mapLabel(match.map) : "No match",
+    roundNumber: null,
+    kills: [],
+    headshots: 0,
+    weaponRaw: null,
+    weapon: null,
+    badge: "REPLAY",
+    title: "Manual clip",
+    durationMs: clip.durationMs,
+    hasClip: true,
+    favorite: false,
+    big: false,
+    at: Number.isNaN(at) ? 0 : at,
+  };
+}
+
+/** Moments with their clips, plus the replays saved by hand. */
+export function buildClips(matches: MatchRecord[], manual: ManualClipRecord[] = []): ClipEntry[] {
   const entries: ClipEntry[] = [];
+  const byId = new Map(matches.map((match) => [match.id, match]));
+  for (const clip of manual) {
+    if (clip.source === "manual") entries.push(manualEntry(clip, clip.matchId ? byId.get(clip.matchId) : undefined));
+  }
   for (const match of matches) {
     const rounds = new Map(match.rounds.map((round) => [round.id, round.number]));
     for (const moment of match.moments) {
@@ -77,6 +139,7 @@ export function buildClips(matches: MatchRecord[]): ClipEntry[] {
       const knife = moment.events.some((event) => flag(event, "knifeKill"));
       entries.push({
         id: moment.id,
+        source: "automatic",
         matchId: match.id,
         moment,
         match: {

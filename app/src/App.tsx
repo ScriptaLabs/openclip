@@ -6,12 +6,13 @@ import type { MatchRecord } from "./domain";
 import {
   getCs2Status,
   getRecordingStatus,
+  getManualClips,
   getSettings,
   matchRepository,
   type Cs2Status,
   type RecordingStatus,
 } from "./data/matchRepository";
-import { buildClips, type ClipEntry } from "./data/clips";
+import { buildClips, type ClipEntry, type ManualClipRecord } from "./data/clips";
 import { buildOverview } from "./data/overview";
 import { EmptySection } from "./components/EmptySection";
 import { Sidebar, type Page } from "./components/Sidebar";
@@ -29,19 +30,22 @@ function App() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [status, setStatus] = useState<Cs2Status | null>(null);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
+  const [manualClips, setManualClips] = useState<ManualClipRecord[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Resolves to whether the data loaded, so callers can retry a failed load.
   const refresh = useMemo(() => async (isActive: () => boolean = () => true): Promise<boolean> => {
     try {
-      const [nextMatches, nextStatus, nextRecordingStatus, settings] = await Promise.all([
+      const [nextMatches, nextStatus, nextRecordingStatus, settings, nextManualClips] = await Promise.all([
         matchRepository.list(),
         getCs2Status(),
         getRecordingStatus(),
         getSettings(),
+        getManualClips(),
       ]);
       if (!isActive()) return true;
       setMatches(nextMatches);
+      setManualClips(nextManualClips);
       setStatus(nextStatus);
       setRecordingStatus(nextRecordingStatus);
       setSelectedMatch((current) => current ? nextMatches.find((item) => item.id === current.id) ?? null : null);
@@ -78,6 +82,7 @@ function App() {
       void listen("gsi_update", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
       // The capture confirmation itself is shown by the overlay window, not in this window.
       void listen("automatic_moment_finalized", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
+      void listen("replay_saved", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
     }
     return () => {
       active = false;
@@ -87,7 +92,7 @@ function App() {
     };
   }, [refresh]);
 
-  const clips = useMemo(() => buildClips(matches), [matches]);
+  const clips = useMemo(() => buildClips(matches, manualClips), [matches, manualClips]);
   const overview = useMemo(() => buildOverview(matches, clips), [matches, clips]);
   const playing = playingId ? clips.find((clip) => clip.id === playingId) ?? null : null;
 

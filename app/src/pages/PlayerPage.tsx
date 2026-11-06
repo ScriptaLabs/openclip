@@ -7,7 +7,7 @@ import { artworkForMap } from "../data/mapArtwork";
 import { ClipThumb } from "../components/ClipThumb";
 import { useClipMedia } from "../components/ClipCard";
 import { formatMode } from "../domain";
-import { loadClipMedia, revealMomentClip, setMomentFavorite, type ClipMediaUrls } from "../data/media";
+import { loadClipMedia, revealClip, setMomentFavorite, type ClipMediaUrls } from "../data/media";
 import { headshotIcon, weaponIcon } from "../lib/weapons";
 
 interface PlayerPageProps {
@@ -84,13 +84,13 @@ export function PlayerPage({ clip, clips, onBack, onSelect, onOpenMatch, onChang
     setDuration(0);
     setNotice(null);
     let active = true;
-    void loadClipMedia(clip.matchId, clip.id).then((urls) => {
+    void loadClipMedia(clip).then((urls) => {
       if (!active) return;
       setMedia(urls);
       if (!urls.clipUrl) setFailed(true);
     });
     return () => { active = false; };
-  }, [clip.id, clip.matchId]);
+  }, [clip.id, clip.matchId, clip.source]);
 
   // Kept separate so toggling a favorite never restarts playback.
   useEffect(() => setFavorite(clip.favorite), [clip.favorite]);
@@ -172,7 +172,7 @@ export function PlayerPage({ clip, clips, onBack, onSelect, onOpenMatch, onChang
   };
 
   const reveal = () => {
-    revealMomentClip(clip.matchId, clip.id).catch((error) => setNotice(String(error)));
+    revealClip(clip).catch((error) => setNotice(String(error)));
   };
 
   const progress = duration > 0 ? time / duration : 0;
@@ -188,9 +188,9 @@ export function PlayerPage({ clip, clips, onBack, onSelect, onOpenMatch, onChang
       <div className="oc-player-top">
         <button className="oc-btn" onClick={onBack} type="button"><ChevronLeft size={16} /> Back</button>
         <div className="oc-actions">
-          <button aria-label={favorite ? "Remove from favorites" : "Add to favorites"} aria-pressed={favorite} className={`oc-icon-btn ${favorite ? "on" : ""}`} onClick={() => void toggleFavorite()} type="button">
+          {clip.source === "automatic" && <button aria-label={favorite ? "Remove from favorites" : "Add to favorites"} aria-pressed={favorite} className={`oc-icon-btn ${favorite ? "on" : ""}`} onClick={() => void toggleFavorite()} type="button">
             <Star fill={favorite ? "currentColor" : "none"} size={16} />
-          </button>
+          </button>}
           <button className="oc-btn" onClick={reveal} type="button"><FolderOpen size={16} /> Show in folder</button>
         </div>
       </div>
@@ -301,13 +301,13 @@ export function PlayerPage({ clip, clips, onBack, onSelect, onOpenMatch, onChang
                 </span>
               </p>
             </div>
-            <button className="oc-match-link" onClick={() => onOpenMatch(clip.matchId)} type="button">
+            {clip.matchId && <button className="oc-match-link" onClick={() => onOpenMatch(clip.matchId)} type="button">
               {art && <img alt="" src={art} />}
               <div>
                 <strong>{formatMode(clip.match.mode)}{clip.match.scoreTeamA !== null ? ` · ${clip.match.scoreTeamA}–${clip.match.scoreTeamB}` : ""}</strong>
                 <span>View match</span>
               </div>
-            </button>
+            </button>}
           </div>
           {notice && <div className="oc-error" role="alert" style={{ marginTop: 18 }}>{notice}</div>}
         </div>

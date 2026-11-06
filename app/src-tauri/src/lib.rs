@@ -529,23 +529,74 @@ fn prepare_clip_media(
     state: State<'_, AppState>,
 ) -> Result<ClipMedia, String> {
     let (clip, first_kill_seconds) = find_moment_clip(&state, match_id, moment_id)?;
+    Ok(prepare_media(&app, &clip, first_kill_seconds))
+}
+
+/// Same as `prepare_clip_media` for a replay saved with the shortcut, which has no moment.
+#[tauri::command(async)]
+fn prepare_manual_clip_media(
+    clip_id: openclip_core::ClipId,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ClipMedia, String> {
+    let clip = find_clip_file(&state, clip_id)?;
+    Ok(prepare_media(&app, &clip, None))
+}
+
+fn prepare_media(
+    app: &tauri::AppHandle,
+    clip: &Path,
+    first_kill_seconds: Option<f64>,
+) -> ClipMedia {
     let scope = app.asset_protocol_scope();
-    scope.allow_file(&clip).map_err(|error| error.to_string())?;
-    let thumbnail = jpeg_thumbnail_path(&clip);
+    if let Err(error) = scope.allow_file(clip) {
+        tracing::warn!(%error, path = %clip.display(), "could not grant access to a clip");
+    }
+    let thumbnail = jpeg_thumbnail_path(clip);
     if !thumbnail.is_file()
-        && let Err(error) = generate_jpeg_thumbnail(&app, &clip, &thumbnail, first_kill_seconds)
+        && let Err(error) = generate_jpeg_thumbnail(app, clip, &thumbnail, first_kill_seconds)
     {
-        tracing::warn!(%error, %moment_id, path = %clip.display(), "could not generate clip thumbnail");
+        tracing::warn!(%error, path = %clip.display(), "could not generate clip thumbnail");
     }
     let thumbnail_path = if thumbnail.is_file() && scope.allow_file(&thumbnail).is_ok() {
         Some(display_path(&thumbnail))
     } else {
         None
     };
-    Ok(ClipMedia {
-        clip_path: display_path(&clip),
+    ClipMedia {
+        clip_path: display_path(clip),
         thumbnail_path,
-    })
+    }
+}
+
+/// The file of a saved clip record, when it is still on disk.
+fn find_clip_file(state: &AppState, clip_id: openclip_core::ClipId) -> Result<PathBuf, String> {
+    let clip = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .list_clips()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| "clip was not found".to_owned())?;
+    if clip.path.is_file() {
+        Ok(clip.path)
+    } else {
+        Err("the clip file is no longer available".to_owned())
+    }
+}
+
+#[tauri::command]
+fn reveal_manual_clip(
+    clip_id: openclip_core::ClipId,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let clip = find_clip_file(&state, clip_id)?;
+    app.opener()
+        .reveal_item_in_dir(clip)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1139,6 +1190,8 @@ pub fn run() {
             set_storage_path,
             open_moment_clip,
             prepare_clip_media,
+            prepare_manual_clip_media,
+            reveal_manual_clip,
             set_moment_favorite,
             reveal_moment_clip,
             export_interesting_moments
