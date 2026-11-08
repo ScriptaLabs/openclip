@@ -7,6 +7,9 @@ import {
   getCs2Status,
   getRecordingStatus,
   getManualClips,
+  getPendingDiagnostics,
+  updateSettings,
+  type PendingReport,
   getSettings,
   matchRepository,
   type Cs2Status,
@@ -15,6 +18,7 @@ import {
 import { buildClips, type ClipEntry, type ManualClipRecord } from "./data/clips";
 import { buildOverview } from "./data/overview";
 import { EmptySection } from "./components/EmptySection";
+import { DiagnosticsBanner } from "./components/DiagnosticsBanner";
 import { Sidebar, type Page } from "./components/Sidebar";
 import { ClipsPage } from "./pages/ClipsPage";
 import { MatchDetailPage } from "./pages/MatchDetailPage";
@@ -31,6 +35,7 @@ function App() {
   const [status, setStatus] = useState<Cs2Status | null>(null);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [manualClips, setManualClips] = useState<ManualClipRecord[]>([]);
+  const [report, setReport] = useState<PendingReport | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Resolves to whether the data loaded, so callers can retry a failed load.
@@ -83,6 +88,26 @@ function App() {
       // The capture confirmation itself is shown by the overlay window, not in this window.
       void listen("automatic_moment_finalized", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
       void listen("replay_saved", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
+      void listen<PendingReport>("diagnostics_pending", (event) => setReport(event.payload)).then((stop) => { unlisten.push(stop); });
+      void getPendingDiagnostics().then(setReport).catch(() => {});
+    } else if (new URLSearchParams(window.location.search).has("diagnostics")) {
+      // Browser-only design preview of the post-match problem report.
+      setReport({
+        id: "preview",
+        incidentCount: 3,
+        payload: {
+          app_version: "0.1.10",
+          os: "Windows 11 25H2 build 26200",
+          gpus: [{ name: "AMD Radeon RX 6700 XT", vendor: "AMD", dedicatedMemoryMb: 12272, driverVersion: "32.0.21.1002", software: false }],
+          encoder: "AMD H.264 Encoder MFT",
+          settings: { videoEncoder: "auto", quality: "high", framesPerSecond: 60 },
+          kinds: ["encoder_failed", "clip_save_failed"],
+          fingerprint: "3fa9c1d2b7e04a18",
+          summary: "AMD H.264 Encoder MFT returned no video after 180 pictures (+2 more)",
+          log: "2026-11-08T20:02:00Z  WARN openclip_capture::windows: encoder failed error=AMD H.264 Encoder MFT returned no video after 180 pictures",
+          user_note: null,
+        },
+      });
     }
     return () => {
       active = false;
@@ -162,6 +187,13 @@ function App() {
         status={status}
       />
       <main className="main-content">
+        {report && (
+          <DiagnosticsBanner
+            onDone={() => setReport(null)}
+            onNeverAsk={() => void getSettings().then((current) => updateSettings({ ...current, diagnosticsPrompt: false }))}
+            report={report}
+          />
+        )}
         <div className="page-transition" key={playing ? `clip-${playing.id}` : selectedMatch ? `match-${selectedMatch.id}` : page}>
           {content}
         </div>

@@ -29,6 +29,10 @@ pub(crate) struct SharedRecorder {
     pub pinned_segments: Mutex<HashSet<PathBuf>>,
     pub deferred_deletes: Mutex<Vec<PathBuf>>,
     pub settings_generation: AtomicU64,
+    /// Encoders that started but could not produce video, skipped until the setting changes.
+    pub failed_encoders: Mutex<Vec<crate::config::EncoderKind>>,
+    /// Problems waiting for the user to decide whether to report them.
+    pub incidents: Mutex<Vec<openclip_core::Incident>>,
 }
 
 /// A ranged save plus how faithfully the retained buffer covered the request.
@@ -78,6 +82,8 @@ impl RecorderService {
             pinned_segments: Mutex::new(HashSet::new()),
             deferred_deletes: Mutex::new(Vec::new()),
             settings_generation: AtomicU64::new(0),
+            failed_encoders: Mutex::new(Vec::new()),
+            incidents: Mutex::new(Vec::new()),
         });
         Ok(Self {
             shared,
@@ -110,6 +116,10 @@ impl RecorderService {
     pub fn update_settings(&self, settings: Settings) {
         let mut current = write(&self.shared.settings);
         let restart_capture = capture_pipeline_changed(&current, &settings);
+        if current.video_encoder != settings.video_encoder {
+            // A new choice deserves a fresh attempt with every encoder.
+            lock(&self.shared.failed_encoders).clear();
+        }
         *current = settings;
         drop(current);
         if restart_capture {
@@ -117,6 +127,17 @@ impl RecorderService {
                 .settings_generation
                 .fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    /// Takes the problems recorded since the last call, oldest first.
+    #[must_use]
+    pub fn take_incidents(&self) -> Vec<openclip_core::Incident> {
+        std::mem::take(&mut *lock(&self.shared.incidents))
+    }
+
+    /// Adds a problem found outside the recorder, such as a clip that could not be saved.
+    pub fn record_incident(&self, kind: openclip_core::IncidentKind, message: impl Into<String>) {
+        record_incident(&self.shared, kind, message);
     }
 
     #[must_use]
@@ -348,14 +369,51 @@ pub(crate) fn waiting_status() -> RecordingStatus {
     }
 }
 
+/// Problems older than the newest this many are dropped; one bad session repeats the same error.
+const MAX_INCIDENTS: usize = 40;
+
+pub(crate) fn record_incident(
+    shared: &SharedRecorder,
+    kind: openclip_core::IncidentKind,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    let encoder = lock(&shared.status).encoder.clone();
+    let mut incidents = lock(&shared.incidents);
+    // The same failure repeating every few seconds is one problem, not forty.
+    if incidents
+        .last()
+        .is_some_and(|last| last.kind == kind && last.message == message)
+    {
+        return;
+    }
+    if incidents.len() >= MAX_INCIDENTS {
+        incidents.remove(0);
+    }
+    incidents.push(openclip_core::Incident {
+        at: Utc::now(),
+        kind,
+        message,
+        encoder,
+    });
+}
+
 pub(crate) fn set_status(
     shared: &SharedRecorder,
     state: RecordingState,
     message: impl Into<String>,
 ) {
+    let message = message.into();
+    if state == RecordingState::Error {
+        record_incident(
+            shared,
+            openclip_core::IncidentKind::CaptureError,
+            message.clone(),
+        );
+    }
     let mut status = lock(&shared.status);
     status.state = state;
-    status.message = Some(message.into());
+    status.message = Some(message);
     if state != RecordingState::Recording && state != RecordingState::SavingReplay {
         status.buffered_seconds = 0;
     }

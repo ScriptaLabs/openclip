@@ -384,6 +384,9 @@ export function SettingsPage({ recordingStatus }: { recordingStatus: RecordingSt
             <Setting label="Keep recording when closed" help="Closing the window sends OpenClip to the tray. Quit from the tray icon.">
               <Switch checked={s?.closeToTray ?? true} disabled={!s} label="Keep recording when closed" onChange={(closeToTray) => s && save({ ...s, closeToTray })} />
             </Setting>
+            <Setting label="Offer problem reports" help="After a match where recording had trouble, ask whether to send an anonymous report. You see everything first and nothing is sent without your click.">
+              <Switch checked={s?.diagnosticsPrompt ?? true} disabled={!s} label="Offer problem reports" onChange={(diagnosticsPrompt) => s && save({ ...s, diagnosticsPrompt })} />
+            </Setting>
             <Setting label="Automatic updates" help="New versions download in the background and install between matches, never during one.">
               <Switch checked={s?.autoUpdate ?? true} disabled={!s} label="Automatic updates" onChange={(autoUpdate) => s && save({ ...s, autoUpdate })} />
             </Setting>

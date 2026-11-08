@@ -1,7 +1,9 @@
 // Tauri command extraction requires owned `State` wrappers and deserialized command arguments.
 #![allow(clippy::needless_pass_by_value)]
 
+mod anonymize;
 mod automatic;
+mod diagnostics;
 mod overlay;
 mod realtime;
 mod updater;
@@ -38,6 +40,7 @@ struct AppState {
     recorder: RecorderService,
     automatic: AutomaticMomentService,
     updates: updater::UpdateService,
+    diagnostics: diagnostics::DiagnosticsService,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +70,73 @@ fn spawn_idle_match_watcher(gsi: &SharedService) -> std::io::Result<()> {
 }
 
 /// Starts the background updater and, when a release channel is configured, its push listener.
+/// Shows the result of each finalized moment, and notes a clip that could not be saved so the user
+/// can be offered a report after the match.
+fn automatic_notifier(
+    app: &tauri::AppHandle,
+    repository: &Arc<Mutex<SqliteRepository>>,
+    recorder: &RecorderService,
+) -> Arc<dyn Fn(AutomaticMomentResult) + Send + Sync> {
+    let app = app.clone();
+    let repository = repository.clone();
+    let recorder = recorder.clone();
+    Arc::new(move |result: AutomaticMomentResult| {
+        let overlay_settings = repository
+            .lock()
+            .ok()
+            .and_then(|repository| repository.load_settings().ok());
+        if let Some(settings) = overlay_settings {
+            overlay::present(&app, &settings, &result);
+        }
+        if result.status == automatic::CaptureStatus::Failed {
+            recorder.record_incident(
+                openclip_core::IncidentKind::ClipSaveFailed,
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "a moment could not be saved".to_owned()),
+            );
+        }
+        if let Err(error) = app.emit("automatic_moment_finalized", result) {
+            tracing::warn!(%error, "could not emit automatic moment result");
+        }
+    })
+}
+
+fn start_diagnostics(
+    app: &tauri::AppHandle,
+    repository: &Arc<Mutex<SqliteRepository>>,
+    gsi: &SharedService,
+    recorder: &RecorderService,
+) -> Result<diagnostics::DiagnosticsService, Box<dyn std::error::Error>> {
+    let match_gsi = gsi.clone();
+    Ok(diagnostics::DiagnosticsService::start(
+        app.clone(),
+        recorder.clone(),
+        repository.clone(),
+        Box::new(move || match_gsi.status().active_match_id.is_some()),
+    )?)
+}
+
+#[tauri::command]
+fn get_pending_diagnostics(state: State<'_, AppState>) -> Option<diagnostics::PendingReport> {
+    state.diagnostics.pending()
+}
+
+#[tauri::command]
+async fn submit_diagnostics(
+    note: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let diagnostics = state.diagnostics.clone();
+    diagnostics.submit(note).await
+}
+
+#[tauri::command]
+fn dismiss_diagnostics(state: State<'_, AppState>) {
+    state.diagnostics.dismiss();
+}
+
 fn start_updates(
     app: &tauri::AppHandle,
     repository: &Arc<Mutex<SqliteRepository>>,
@@ -1034,20 +1104,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let recorder = RecorderService::new(&data_dir, settings.clone())
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let app_handle = app.handle().clone();
-    let notification_app = app.handle().clone();
-    let notification_repository = repository.clone();
-    let notify = Arc::new(move |result: AutomaticMomentResult| {
-        let overlay_settings = notification_repository
-            .lock()
-            .ok()
-            .and_then(|repository| repository.load_settings().ok());
-        if let Some(settings) = overlay_settings {
-            overlay::present(&notification_app, &settings, &result);
-        }
-        if let Err(error) = notification_app.emit("automatic_moment_finalized", result) {
-            tracing::warn!(%error, "could not emit automatic moment result");
-        }
-    });
+    let notify = automatic_notifier(app.handle(), &repository, &recorder);
     let automatic = AutomaticMomentService::start(
         repository.clone(),
         recorder.clone(),
@@ -1062,12 +1119,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
     let gsi = Arc::new(GsiService::with_observer(repository.clone(), observer));
     let updates = start_updates(app.handle(), &repository, &gsi, &recorder);
+    let diagnostics = start_diagnostics(app.handle(), &repository, &gsi, &recorder)?;
     app.manage(AppState {
         repository,
         gsi: gsi.clone(),
         recorder: recorder.clone(),
         automatic,
         updates,
+        diagnostics,
     });
 
     // Only after the state is managed. Creating another WebView2 window pumps messages, which
@@ -1191,6 +1250,9 @@ pub fn run() {
             open_moment_clip,
             prepare_clip_media,
             prepare_manual_clip_media,
+            get_pending_diagnostics,
+            submit_diagnostics,
+            dismiss_diagnostics,
             reveal_manual_clip,
             set_moment_favorite,
             reveal_moment_clip,

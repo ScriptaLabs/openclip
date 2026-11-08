@@ -1,5 +1,14 @@
 use openclip_core::{RecordingQuality, RecordingResolution, Settings, VideoEncoderPreference};
 
+/// The encoders `OpenClip` can record with. A kind that starts but then fails is skipped for the rest
+/// of the run, so a machine falls back to the next one instead of recording nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EncoderKind {
+    Nvenc,
+    MediaFoundationHardware,
+    MediaFoundationSoftware,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderConfig {
     pub width: u32,

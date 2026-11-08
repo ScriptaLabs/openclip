@@ -64,6 +64,7 @@ export interface RecordingSettings {
   soundVolume: number;
   autoUpdate: boolean;
   closeToTray: boolean;
+  diagnosticsPrompt: boolean;
 }
 
 export interface AudioDevice {
@@ -123,6 +124,38 @@ class FixtureMatchRepository implements MatchRepository {
 export const matchRepository: MatchRepository = isTauri()
   ? new TauriMatchRepository()
   : new FixtureMatchRepository();
+
+/** What an anonymous problem report contains, exactly as it would be sent. */
+export interface ReportPayload {
+  app_version: string;
+  os: string;
+  gpus: Array<{ name: string; vendor: string; dedicatedMemoryMb: number; driverVersion: string | null; software: boolean }>;
+  encoder: string | null;
+  settings: Record<string, unknown>;
+  kinds: string[];
+  fingerprint: string;
+  summary: string;
+  log: string;
+  user_note: string | null;
+}
+
+export interface PendingReport {
+  id: string;
+  incidentCount: number;
+  payload: ReportPayload;
+}
+
+export async function getPendingDiagnostics(): Promise<PendingReport | null> {
+  return isTauri() ? invoke<PendingReport | null>("get_pending_diagnostics") : null;
+}
+
+export async function submitDiagnostics(note: string | null): Promise<void> {
+  if (isTauri()) await invoke("submit_diagnostics", { note });
+}
+
+export async function dismissDiagnostics(): Promise<void> {
+  if (isTauri()) await invoke("dismiss_diagnostics");
+}
 
 /** Replays saved with the shortcut, newest first. Empty in the browser preview. */
 export async function getManualClips(): Promise<ManualClipRecord[]> {
@@ -192,6 +225,7 @@ const browserSettings: RecordingSettings = {
   soundVolume: 60,
   autoUpdate: true,
   closeToTray: true,
+  diagnosticsPrompt: true,
 };
 
 export async function getSettings(): Promise<RecordingSettings> {

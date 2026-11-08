@@ -142,6 +142,7 @@ More detail lives in the docs:
 - [`docs/capture.md`](docs/capture.md) for capture, encoders and diagnostics
 - [`docs/cs2-gsi.md`](docs/cs2-gsi.md) for the game-state payloads
 - [`docs/moments.md`](docs/moments.md) for how moments are merged, scored and finalized
+- [`docs/diagnostics.md`](docs/diagnostics.md) for the opt-in anonymous problem reports
 - [`docs/releasing.md`](docs/releasing.md) for how a release goes out
 
 ## Where it's headed

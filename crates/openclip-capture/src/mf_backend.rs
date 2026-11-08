@@ -21,17 +21,18 @@ use windows::Win32::Media::MediaFoundation::{
     ICodecAPI, IMFActivate, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
     METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_NOTACCEPTING,
     MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
-    MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
-    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_TRANSFORM_ASYNC,
-    MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransferMatrix_BT709,
-    eAVEncCommonRateControlMode_PeakConstrainedVBR, eAVEncH264VProfile_Main,
+    MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+    MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_SUBTYPE, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL,
+    MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
+    MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_PeakConstrainedVBR,
+    eAVEncH264VProfile_Main,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Variant::VARIANT;
@@ -41,7 +42,7 @@ use windows_capture::frame::Frame;
 use crate::config::EncoderConfig;
 use crate::h264::{
     BackendError, VideoSegment, annex_b_nals, annex_b_to_length_prefixed, assemble_segment,
-    avcc_from_annex_b,
+    avcc_from_annex_b, to_annex_b,
 };
 use crate::pixel::{Geometry, bgra_to_nv12};
 
@@ -49,6 +50,8 @@ const HUNDRED_NS_PER_SECOND: i64 = 10_000_000;
 /// A transform that stops answering must not freeze the capture callback forever.
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 const IDR_NAL_TYPE: u8 = 5;
+/// Seconds of pictures fed in with nothing coming out before the encoder is declared dead.
+const SILENT_SECONDS: usize = 3;
 
 /// Which class of Media Foundation transform to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +95,10 @@ pub(crate) struct MfEncoder {
     /// Pictures the transform has asked for but not yet received (asynchronous transforms).
     input_credits: u32,
     submitted: i64,
+    /// Pictures the transform has returned, to notice one that swallows frames.
+    produced: u64,
+    /// Pictures returned before the first IDR, which cannot start a segment.
+    before_first_idr: usize,
     since_key: usize,
     avcc: Option<Vec<u8>>,
     sequence_header: Option<Vec<u8>>,
@@ -153,6 +160,8 @@ impl MfEncoder {
         if is_async {
             let attributes = unsafe { transform.GetAttributes() }?;
             unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }?;
+            // Asks vendor transforms not to hold pictures back for look-ahead. Ignored if unsupported.
+            let _ = unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) };
         }
 
         // Encoders require the output type first, then accept an input type that matches it.
@@ -214,6 +223,8 @@ impl MfEncoder {
             nv12: Vec::new(),
             input_credits: 0,
             submitted: 0,
+            produced: 0,
+            before_first_idr: 0,
             since_key: 0,
             avcc: None,
             sequence_header,
@@ -240,7 +251,26 @@ impl MfEncoder {
             self.submit()?;
         }
         self.collect_outputs()?;
+        self.check_alive()?;
         Ok(self.ready.pop_front())
+    }
+
+    /// A transform that accepts pictures and never returns any would leave the replay buffer empty
+    /// while the app reports that it is recording. Say so, so another encoder can take over.
+    fn check_alive(&self) -> Result<(), BackendError> {
+        let silent_limit =
+            i64::try_from(usize::from(self.frames_per_second) * SILENT_SECONDS).unwrap_or(i64::MAX);
+        if self.produced == 0 && self.submitted >= silent_limit {
+            return Err(format!(
+                "{} returned no video after {} pictures",
+                self.name, self.submitted
+            )
+            .into());
+        }
+        if self.avcc.is_none() && self.before_first_idr > self.segment_frames * 2 {
+            return Err(format!("{} never produced a key frame", self.name).into());
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_segment(&mut self) -> Result<Option<VideoSegment>, BackendError> {
@@ -447,7 +477,11 @@ impl MfEncoder {
     }
 
     /// Places an encoded picture in the segment being built, cutting a new segment at each IDR.
-    fn accept(&mut self, annex_b: &[u8]) -> Result<(), BackendError> {
+    fn accept(&mut self, picture: &[u8]) -> Result<(), BackendError> {
+        self.produced += 1;
+        // Some transforms hand back length-prefixed pictures instead of Annex B.
+        let converted = to_annex_b(picture);
+        let annex_b = converted.as_deref().unwrap_or(picture);
         let is_idr = annex_b_nals(annex_b)
             .iter()
             .any(|nal| nal.first().is_some_and(|byte| byte & 0x1f == IDR_NAL_TYPE));
@@ -458,6 +492,7 @@ impl MfEncoder {
             }
         } else if self.current.is_empty() {
             // Pictures before the first IDR cannot start a segment.
+            self.before_first_idr += 1;
             return Ok(());
         }
         self.current.push(annex_b_to_length_prefixed(annex_b)?);
@@ -779,6 +814,28 @@ mod tests {
                 (WIDTH as usize, HEIGHT as usize),
             )
             .expect("texture converts again");
+    }
+
+    #[test]
+    fn an_encoder_that_returns_nothing_is_reported_instead_of_recording_silence() {
+        let mut encoder = MfEncoder::new(config(), Kind::Software).expect("software encoder");
+        encoder.submitted = i64::from(FPS) * 2;
+        assert!(
+            encoder.check_alive().is_ok(),
+            "still within the grace period"
+        );
+        encoder.submitted = i64::from(FPS) * 4;
+        let error = encoder
+            .check_alive()
+            .expect_err("no output after 4 seconds");
+        assert!(error.to_string().contains("returned no video"), "{error}");
+
+        encoder.produced = 10;
+        encoder.before_first_idr = usize::from(FPS) * 5;
+        let error = encoder
+            .check_alive()
+            .expect_err("pictures but no key frame");
+        assert!(error.to_string().contains("key frame"), "{error}");
     }
 
     #[test]

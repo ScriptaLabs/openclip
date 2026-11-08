@@ -7,7 +7,7 @@
 use openclip_core::VideoEncoderPreference;
 use windows_capture::frame::Frame;
 
-use crate::config::EncoderConfig;
+use crate::config::{EncoderConfig, EncoderKind};
 use crate::h264::{BackendError, VideoSegment};
 use crate::mf_backend::{Kind, MfEncoder};
 use crate::nvenc_backend::DirectNvencEncoder;
@@ -22,6 +22,7 @@ pub(crate) enum SegmentEncoder {
 pub(crate) struct EncoderInfo {
     pub label: String,
     pub hardware: bool,
+    pub kind: EncoderKind,
 }
 
 impl SegmentEncoder {
@@ -29,10 +30,11 @@ impl SegmentEncoder {
         frame: &Frame<'_>,
         config: EncoderConfig,
         preference: VideoEncoderPreference,
+        skip: &[EncoderKind],
     ) -> Result<(Self, EncoderInfo), BackendError> {
         let mut failures: Vec<String> = Vec::new();
         if preference != VideoEncoderPreference::Software {
-            if nvenc_present() {
+            if nvenc_present() && !skip.contains(&EncoderKind::Nvenc) {
                 match DirectNvencEncoder::new(frame, config) {
                     Ok(encoder) => {
                         return Ok((
@@ -40,6 +42,7 @@ impl SegmentEncoder {
                             EncoderInfo {
                                 label: "NVIDIA NVENC".to_owned(),
                                 hardware: true,
+                                kind: EncoderKind::Nvenc,
                             },
                         ));
                     }
@@ -49,11 +52,15 @@ impl SegmentEncoder {
                     }
                 }
             }
-            match MfEncoder::new(config, Kind::Hardware) {
-                Ok(encoder) => return Ok(Self::media_foundation(encoder, true)),
-                Err(error) => {
-                    tracing::warn!(%error, "no Media Foundation hardware encoder");
-                    failures.push(format!("hardware encoder: {error}"));
+            if skip.contains(&EncoderKind::MediaFoundationHardware) {
+                failures.push("hardware encoder: stopped producing video earlier".to_owned());
+            } else {
+                match MfEncoder::new(config, Kind::Hardware) {
+                    Ok(encoder) => return Ok(Self::media_foundation(encoder, true)),
+                    Err(error) => {
+                        tracing::warn!(%error, "no Media Foundation hardware encoder");
+                        failures.push(format!("hardware encoder: {error}"));
+                    }
                 }
             }
         }
@@ -77,9 +84,18 @@ impl SegmentEncoder {
         } else {
             format!("{} (CPU)", encoder.name())
         };
+        let kind = if hardware {
+            EncoderKind::MediaFoundationHardware
+        } else {
+            EncoderKind::MediaFoundationSoftware
+        };
         (
             Self::MediaFoundation(Box::new(encoder)),
-            EncoderInfo { label, hardware },
+            EncoderInfo {
+                label,
+                hardware,
+                kind,
+            },
         )
     }
 

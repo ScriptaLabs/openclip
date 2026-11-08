@@ -32,6 +32,8 @@ tokio.workspace = true
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 url = "2"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"

@@ -203,6 +203,33 @@ pub struct Clip {
     pub has_game_audio: bool,
 }
 
+/// What went wrong, in terms useful for fixing it. Reports group by this and the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentKind {
+    /// Capture could not start, or a capture session ended with an error.
+    CaptureError,
+    /// The video encoder started but stopped working or produced nothing.
+    EncoderFailed,
+    /// A moment was detected but its clip could not be saved.
+    ClipSaveFailed,
+    /// A replay segment could not be finalized.
+    SegmentFailed,
+    /// Game or microphone audio was unavailable.
+    AudioUnavailable,
+}
+
+/// One thing that went wrong while recording. Kept in memory until the user decides whether to send
+/// an anonymous report; nothing leaves the machine without that choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Incident {
+    pub at: DateTime<Utc>,
+    pub kind: IncidentKind,
+    pub message: String,
+    /// The encoder in use when it happened, if known.
+    pub encoder: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingState {

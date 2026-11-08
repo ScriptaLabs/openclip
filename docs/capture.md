@@ -39,6 +39,18 @@ The `videoEncoder` setting picks the encoder: `auto` (default), `hardware` or `s
 step 3 and records at 30 FPS at most. The encoder in use is shown on the Overview status line, and
 every clip records it.
 
+An encoder that starts but never delivers video (no pictures back after three seconds of input, or no
+key frame) is treated as failed: the session restarts, that encoder is skipped until the Encoder
+setting changes, and `auto` moves on to the next one. This keeps a driver quirk from leaving a
+machine "recording" an empty buffer, which shows up as "Couldn't capture this moment". The reason is
+written to `openclip.log`. Pictures returned length-prefixed instead of Annex B are converted.
+
+**Why not Vulkan?** Capture is Windows Graphics Capture, which hands over Direct3D 11 textures. Vulkan
+Video encode would need those textures shared into Vulkan, a driver that implements the H.264 encode
+extension, and a separate bitstream path, for a result AMD already offers through Media Foundation and
+AMF. AMD's own direct route, the AMF runtime taking D3D11 textures much like NVENC does, is the better
+next step if the Media Foundation path proves too slow on AMD.
+
 The Media Foundation path (`mf_backend.rs`) copies each captured frame into a CPU-readable staging
 texture, converts BGRA to BT.709 limited-range NV12 (`pixel.rs`), and feeds the transform. It is
 more expensive than NVENC's zero-copy path (a 1080p frame is roughly 8 MB to read back and convert),

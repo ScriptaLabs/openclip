@@ -103,6 +103,10 @@ pub struct Settings {
     /// Notification sound loudness, 0 to 100.
     #[serde(default = "default_sound_volume")]
     pub sound_volume: u8,
+    /// After a match with a capture problem, offer to send an anonymous report. Nothing is sent
+    /// without a click.
+    #[serde(default = "default_true")]
+    pub diagnostics_prompt: bool,
     /// Download and install new versions in the background.
     #[serde(default = "default_true")]
     pub auto_update: bool,
@@ -151,6 +155,7 @@ impl Default for Settings {
             overlay_clip_preview: true,
             sounds_enabled: true,
             sound_volume: default_sound_volume(),
+            diagnostics_prompt: true,
             auto_update: true,
             close_to_tray: true,
         }
@@ -209,6 +214,7 @@ mod tests {
         assert!(settings.skip_workshop_maps && settings.skip_community_servers);
         assert!(settings.skips(super::MatchOrigin::Workshop));
         assert!(!settings.skips(super::MatchOrigin::Official));
+        assert!(settings.diagnostics_prompt);
         assert!(settings.auto_update);
         assert!(settings.close_to_tray);
     }

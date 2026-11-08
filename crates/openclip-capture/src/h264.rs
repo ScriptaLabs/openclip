@@ -62,6 +62,27 @@ pub(crate) fn avcc_from_annex_b(data: &[u8]) -> Result<Vec<u8>, BackendError> {
     Ok(avcc)
 }
 
+/// Rewrites a picture made of 4-byte length-prefixed NAL units as Annex B. Returns `None` when the
+/// data already starts with a start code, or is not length-prefixed at all.
+pub(crate) fn to_annex_b(data: &[u8]) -> Option<Vec<u8>> {
+    if data.starts_with(&[0, 0, 0, 1]) || data.starts_with(&[0, 0, 1]) {
+        return None;
+    }
+    let mut output = Vec::with_capacity(data.len() + 16);
+    let mut rest = data;
+    while !rest.is_empty() {
+        let (length, tail) = rest.split_first_chunk::<4>()?;
+        let length = usize::try_from(u32::from_be_bytes(*length)).ok()?;
+        if length == 0 || length > tail.len() {
+            return None;
+        }
+        output.extend_from_slice(&[0, 0, 0, 1]);
+        output.extend_from_slice(&tail[..length]);
+        rest = &tail[length..];
+    }
+    Some(output)
+}
+
 pub(crate) fn annex_b_to_length_prefixed(data: &[u8]) -> Result<Vec<u8>, BackendError> {
     let mut output = Vec::with_capacity(data.len());
     for nal in annex_b_nals(data) {
@@ -123,6 +144,18 @@ mod tests {
         let sample = annex_b_to_length_prefixed(&packet).unwrap();
         assert_eq!(&sample[..4], &5_u32.to_be_bytes());
         assert!(sample.ends_with(&[0, 0, 0, 2, 0x65, 0xaa]));
+    }
+
+    #[test]
+    fn length_prefixed_pictures_are_rewritten_as_annex_b() {
+        let prefixed = [0, 0, 0, 2, 0x65, 0xaa, 0, 0, 0, 1, 0x41];
+        assert_eq!(
+            to_annex_b(&prefixed).unwrap(),
+            [0, 0, 0, 1, 0x65, 0xaa, 0, 0, 0, 1, 0x41]
+        );
+        // Already Annex B, or not a valid length-prefixed picture: left alone.
+        assert_eq!(to_annex_b(&[0, 0, 0, 1, 0x65]), None);
+        assert_eq!(to_annex_b(&[0, 0, 0, 9, 0x65]), None);
     }
 
     #[test]

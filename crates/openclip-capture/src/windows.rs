@@ -110,6 +110,7 @@ struct FinalizationJob {
 struct Cs2CaptureHandler {
     flags: HandlerFlags,
     encoder: Option<SegmentEncoder>,
+    encoder_kind: Option<crate::config::EncoderKind>,
     pacer: Option<FramePacer>,
     audio_segment: Option<PreparedAudioSegment>,
     segment_started_at_ms: u64,
@@ -134,6 +135,7 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
         Ok(Self {
             flags: ctx.flags,
             encoder: None,
+            encoder_kind: None,
             pacer: None,
             audio_segment: None,
             segment_started_at_ms: 0,
@@ -186,7 +188,22 @@ impl GraphicsCaptureApiHandler for Cs2CaptureHandler {
                 .expect("encoder and pacer are initialized together")
                 .frames_due(timestamp);
             let encode_started = Instant::now();
-            if let Some(segment) = encoder.encode_frame(frame, copies)? {
+            let encoded = match encoder.encode_frame(frame, copies) {
+                Ok(segment) => segment,
+                Err(error) => {
+                    if let Some(kind) = self.encoder_kind {
+                        tracing::warn!(%error, ?kind, "encoder failed; the next start will use another");
+                        lock(&self.flags.shared.failed_encoders).push(kind);
+                        crate::recorder::record_incident(
+                            &self.flags.shared,
+                            openclip_core::IncidentKind::EncoderFailed,
+                            error.to_string(),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(segment) = encoded {
                 self.queue_segment_finalization(segment)?;
                 self.prepare_next_audio(source_size)?;
             }
@@ -295,13 +312,22 @@ impl Cs2CaptureHandler {
         );
         let initialized = Instant::now();
         let preference = read(&self.flags.shared.settings).video_encoder;
-        let (encoder, info) = SegmentEncoder::select(frame, config, preference)?;
+        let skip = lock(&self.flags.shared.failed_encoders).clone();
+        let (encoder, info) = SegmentEncoder::select(frame, config, preference, &skip)?;
+        self.encoder_kind = Some(info.kind);
         self.encoder = Some(encoder);
         self.pacer = Some(FramePacer::new(config.frames_per_second));
         self.audio_segment = Some(prepared);
         let _ = self.flags.audio_encoder_request.try_send(source_size);
 
         let audio_error = lock(&self.flags.audio_error).clone();
+        if let Some(error) = &audio_error {
+            crate::recorder::record_incident(
+                &self.flags.shared,
+                openclip_core::IncidentKind::AudioUnavailable,
+                error.clone(),
+            );
+        }
         let manual_replay_shortcut = read(&self.flags.shared.settings)
             .manual_replay_shortcut
             .clone();
@@ -564,6 +590,11 @@ fn spawn_segment_finalizer(
             while let Ok(job) = receiver.recv() {
                 if let Err(error) = finalize_segment(&shared, job) {
                     tracing::error!(%error, "could not finalize replay segment");
+                    crate::recorder::record_incident(
+                        &shared,
+                        openclip_core::IncidentKind::SegmentFailed,
+                        error.to_string(),
+                    );
                 }
             }
         })?;
