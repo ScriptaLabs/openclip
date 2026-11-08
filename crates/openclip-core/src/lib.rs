@@ -4,8 +4,10 @@
 
 pub mod models;
 pub mod ports;
+pub mod retention;
 pub mod settings;
 
 pub use models::*;
 pub use ports::*;
+pub use retention::*;
 pub use settings::*;

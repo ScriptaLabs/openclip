@@ -9,6 +9,9 @@ use regex::Regex;
 /// Longest log excerpt a report may carry. The server enforces the same limit.
 pub(crate) const MAX_LOG_CHARS: usize = 60_000;
 
+/// Stands in for an account or computer name while the patterns run.
+const NAME_MARK: &str = "OPENCLIPREDACTEDNAME";
+
 struct Rule {
     pattern: Regex,
     replacement: &'static str,
@@ -24,7 +27,11 @@ fn rule(pattern: &str, replacement: &'static str) -> Rule {
 static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     vec![
         // File locations carry the Windows account name and often folder names the user chose.
-        rule(r#"(?i)(?:\\\\\?\\)?[a-z]:[\\/][^\s"'<>|*?]*"#, "<path>"),
+        // Folder names may contain spaces ("John Smith", "My Clips"); the file name itself may not.
+        rule(
+            r#"(?i)(?:\\\\\?\\)?\b[a-z]:[\\/](?:[^\\/:*?"<>|\r\n]+[\\/])*[^\s\\/:*?"'<>|]*"#,
+            "<path>",
+        ),
         rule(r#"\\\\[^\s"'<>|*?\\]+\\[^\s"'<>|*?]*"#, "<path>"),
         rule(
             r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
@@ -32,12 +39,17 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         ),
         rule(r"\b7656119\d{10}\b", "<steamid>"),
         rule(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", "<email>"),
-        // Addresses on the local machine are not identifying; every other IPv4 address is removed.
+        // Every IPv4 address is removed, loopback included.
         rule(
             r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b",
             "<ip>",
         ),
-        rule(r"(?i)\b(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}\b", "<ip>"),
+        // IPv6, with or without "::" compression. Plain times such as 20:02:00 do not match.
+        rule(
+            r"(?i)\b(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?",
+            "<ip>",
+        ),
+        rule(r"(?i)\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b", "<ip>"),
         rule(
             r"(?i)\b(bearer|apikey|api_key|token|secret|password)(\s*[=:]\s*|\s+)\S+",
             "$1$2<secret>",
@@ -83,18 +95,20 @@ impl Identity {
 /// Anonymizes one piece of text (a log line, an error message or a note).
 pub(crate) fn scrub(text: &str, identity: &Identity) -> String {
     let mut result = text.to_owned();
+    // Names go first: a path pattern could otherwise stop in the middle of one that has a space.
+    for term in &identity.terms {
+        if let Ok(pattern) = Regex::new(&format!("(?i){}", regex::escape(term))) {
+            result = pattern.replace_all(&result, NAME_MARK).into_owned();
+        }
+    }
     for rule in RULES.iter() {
         result = rule
             .pattern
             .replace_all(&result, rule.replacement)
             .into_owned();
     }
-    for term in &identity.terms {
-        if let Ok(pattern) = Regex::new(&format!("(?i){}", regex::escape(term))) {
-            result = pattern.replace_all(&result, "<user>").into_owned();
-        }
-    }
-    result
+    // The mark is plain letters, so a path pattern passes over it; it becomes <user> only now.
+    result.replace(NAME_MARK, "<user>")
 }
 
 /// A stable key for "the same problem", ignoring numbers and anything specific to one run.
@@ -165,6 +179,50 @@ mod tests {
             scrub(r#"match started map=Some("de_mirage")"#, &identity()),
             r#"match started map=Some("de_mirage")"#
         );
+    }
+
+    #[test]
+    fn realistic_log_lines_with_spaces_urls_and_error_codes_are_cleaned() {
+        let identity = Identity::from_terms(["John Smith".to_owned(), "JOHNS-LAPTOP".to_owned()]);
+        let lines = [
+            (
+                r"WARN openclip_capture::recorder: replay saved path=\\?\C:\Users\John Smith\Videos\My Clips\2026-11-02\19-52-58_manual.mp4",
+                "WARN openclip_capture::recorder: replay saved path=<path>",
+            ),
+            (
+                r"ERROR could not open D:\Spiele & Clips\OpenClip\x.mp4: Access is denied. (0x80070005)",
+                "ERROR could not open <path>: Access is denied. (0x80070005)",
+            ),
+            (
+                "WARN net: GET https://api.example.com/v1?token=abc123XYZ&user=76561198012345678 failed",
+                "WARN net: GET https://api.example.com/v1?token=<secret> failed",
+            ),
+            (
+                "WARN JOHNS-LAPTOP lost connection to 10.0.0.5:27015 and fe80::1ff:fe23:4567:890a",
+                "WARN <user> lost connection to <ip>:27015 and <ip>",
+            ),
+            (
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abcdefghijklmnopqrstuvwxyz0123456789",
+                "Authorization: Bearer <secret>",
+            ),
+        ];
+        for (raw, expected) in lines {
+            assert_eq!(scrub(raw, &identity), expected, "input: {raw}");
+        }
+    }
+
+    #[test]
+    fn known_encoder_and_graphics_errors_survive_intact() {
+        let samples = [
+            "AMD H.264 Encoder MFT returned no video after 180 pictures",
+            "Encoder failed MFT_MESSAGE_COMMAND_FLUSH message (0x80004005)",
+            "D3D11 did not create a staging texture",
+            "NVENC error: InvalidParam",
+            "could not load NVENC: library not found",
+        ];
+        for sample in samples {
+            assert_eq!(scrub(sample, &identity()), sample);
+        }
     }
 
     #[test]

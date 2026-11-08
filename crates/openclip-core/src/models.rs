@@ -201,6 +201,10 @@ pub struct Clip {
     pub codec: String,
     pub encoder: String,
     pub has_game_audio: bool,
+    /// Favorites are never deleted by clip retention. For a clip made from a moment this follows the
+    /// moment; a manual replay carries its own flag.
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 /// What went wrong, in terms useful for fixing it. Reports group by this and the message.

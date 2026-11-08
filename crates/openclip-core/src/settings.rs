@@ -103,6 +103,12 @@ pub struct Settings {
     /// Notification sound loudness, 0 to 100.
     #[serde(default = "default_sound_volume")]
     pub sound_volume: u8,
+    /// Delete saved clips older than this many days. Favorites are kept. `None` keeps them forever.
+    #[serde(default)]
+    pub retention_max_age_days: Option<u16>,
+    /// Once saved clips take more than this many GiB, delete the oldest. Favorites are kept.
+    #[serde(default)]
+    pub retention_max_size_gb: Option<u16>,
     /// After a match with a capture problem, offer to send an anonymous report. Nothing is sent
     /// without a click.
     #[serde(default = "default_true")]
@@ -155,6 +161,8 @@ impl Default for Settings {
             overlay_clip_preview: true,
             sounds_enabled: true,
             sound_volume: default_sound_volume(),
+            retention_max_age_days: None,
+            retention_max_size_gb: None,
             diagnostics_prompt: true,
             auto_update: true,
             close_to_tray: true,

@@ -65,6 +65,8 @@ export interface RecordingSettings {
   autoUpdate: boolean;
   closeToTray: boolean;
   diagnosticsPrompt: boolean;
+  retentionMaxAgeDays: number | null;
+  retentionMaxSizeGb: number | null;
 }
 
 export interface AudioDevice {
@@ -124,6 +126,30 @@ class FixtureMatchRepository implements MatchRepository {
 export const matchRepository: MatchRepository = isTauri()
   ? new TauriMatchRepository()
   : new FixtureMatchRepository();
+
+/** What a set of retention limits would delete, before anything is. */
+export interface RetentionPreview {
+  totalClips: number;
+  totalBytes: number;
+  favoriteClips: number;
+  deleteClips: number;
+  deleteBytes: number;
+}
+
+export async function previewRetention(maxAgeDays: number | null, maxSizeGb: number | null): Promise<RetentionPreview> {
+  if (!isTauri()) {
+    // Browser preview: plausible numbers so the card can be designed.
+    const deleteClips = (maxAgeDays ? 9 : 0) + (maxSizeGb ? 14 : 0);
+    return { totalClips: 85, totalBytes: 13.4 * 2 ** 30, favoriteClips: 3, deleteClips, deleteBytes: deleteClips * 0.11 * 2 ** 30 };
+  }
+  return invoke<RetentionPreview>("preview_retention", { maxAgeDays, maxSizeGb });
+}
+
+/** Deletes the clips the saved limits call for, now. */
+export async function applyRetention(): Promise<{ deleted: number; freedBytes: number }> {
+  if (!isTauri()) return { deleted: 0, freedBytes: 0 };
+  return invoke<{ deleted: number; freedBytes: number }>("apply_retention");
+}
 
 /** What an anonymous problem report contains, exactly as it would be sent. */
 export interface ReportPayload {
@@ -226,6 +252,8 @@ const browserSettings: RecordingSettings = {
   autoUpdate: true,
   closeToTray: true,
   diagnosticsPrompt: true,
+  retentionMaxAgeDays: null,
+  retentionMaxSizeGb: null,
 };
 
 export async function getSettings(): Promise<RecordingSettings> {

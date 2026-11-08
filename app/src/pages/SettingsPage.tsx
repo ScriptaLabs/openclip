@@ -1,3 +1,4 @@
+import { RetentionSettings } from "../components/RetentionSettings";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { FolderOpen } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -132,6 +133,11 @@ export function SettingsPage({ recordingStatus }: { recordingStatus: RecordingSt
   const save = (next: RecordingSettings) => {
     setSettings(next);
     updateSettings(next).catch((failure) => setError(failure instanceof Error ? failure.message : String(failure)));
+  };
+
+  const saveNow = async (next: RecordingSettings) => {
+    setSettings(next);
+    await updateSettings(next);
   };
 
   // The slider moves local state while dragging; the value is stored (and heard) on release.
@@ -351,6 +357,7 @@ export function SettingsPage({ recordingStatus }: { recordingStatus: RecordingSt
                 <button className="oc-btn" disabled={!s} onClick={() => void chooseStorage()} type="button">Change</button>
               </div>
             </Setting>
+            <RetentionSettings onSave={saveNow} settings={s} />
           </section>
 
           <section className="oc-card oc-section" id="shortcuts" ref={(node) => { if (node) refs.current.set("shortcuts", node); }}>

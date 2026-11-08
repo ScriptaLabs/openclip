@@ -50,6 +50,8 @@ to a match, so you can open a match afterwards and see where all your kills happ
 - **Game audio and microphone.** Record CS2's sound on its own, and mix your mic in if you want to.
 - **Little pop-up when a clip lands.** A small preview in the corner, with sounds you can turn down or
   off.
+- **Cleans up after itself.** Optionally delete old clips by age or by total size. Favorites are
+  always kept, and nothing is deleted until you apply the limits.
 - **Built-in player and match pages.** Watch clips, see weapon stats and jump to the moments in a match.
 - **Updates itself.** New versions download quietly and install between matches, never in the middle
   of one.
@@ -142,6 +144,7 @@ More detail lives in the docs:
 - [`docs/capture.md`](docs/capture.md) for capture, encoders and diagnostics
 - [`docs/cs2-gsi.md`](docs/cs2-gsi.md) for the game-state payloads
 - [`docs/moments.md`](docs/moments.md) for how moments are merged, scored and finalized
+- [`docs/retention.md`](docs/retention.md) for automatic clip cleanup
 - [`docs/diagnostics.md`](docs/diagnostics.md) for the opt-in anonymous problem reports
 - [`docs/releasing.md`](docs/releasing.md) for how a release goes out
 

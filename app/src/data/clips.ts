@@ -19,6 +19,7 @@ export interface ManualClipRecord {
   createdAt: string;
   path: string;
   durationMs: number;
+  isFavorite: boolean;
 }
 
 export interface ClipEntry {
@@ -90,7 +91,7 @@ function manualEntry(clip: ManualClipRecord, match: MatchRecord | undefined): Cl
     importance: 0,
     clipId: clip.id,
     clipPath: clip.path,
-    isFavorite: false,
+    isFavorite: clip.isFavorite,
     title: "Manual clip",
     weapon: "",
     thumbnailTone: "cyan",
@@ -116,7 +117,7 @@ function manualEntry(clip: ManualClipRecord, match: MatchRecord | undefined): Cl
     title: "Manual clip",
     durationMs: clip.durationMs,
     hasClip: true,
-    favorite: false,
+    favorite: clip.isFavorite,
     big: false,
     at: Number.isNaN(at) ? 0 : at,
   };

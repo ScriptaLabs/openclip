@@ -82,7 +82,14 @@ jobs:
         working-directory: app
         run: |
           npm ci
-          npx tauri build
+          # The build downloads its installer tooling from GitHub, which now and then answers 5xx.
+          # A transient failure should not cost a release, so try again a couple of times.
+          for attempt in 1 2 3; do
+            if npx tauri build; then exit 0; fi
+            echo "::warning::tauri build failed (attempt $attempt of 3)"
+            sleep 30
+          done
+          exit 1
 
       - name: Prepare release files
         shell: bash

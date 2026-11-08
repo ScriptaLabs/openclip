@@ -6,6 +6,7 @@ mod automatic;
 mod diagnostics;
 mod overlay;
 mod realtime;
+mod retention;
 mod updater;
 
 use std::path::{Path, PathBuf};
@@ -116,6 +117,63 @@ fn start_diagnostics(
         repository.clone(),
         Box::new(move || match_gsi.status().active_match_id.is_some()),
     )?)
+}
+
+/// What a set of retention limits would delete right now, without deleting anything.
+#[tauri::command]
+fn preview_retention(
+    max_age_days: Option<u16>,
+    max_size_gb: Option<u16>,
+    state: State<'_, AppState>,
+) -> Result<retention::RetentionPreview, String> {
+    let draft = Settings {
+        retention_max_age_days: max_age_days,
+        retention_max_size_gb: max_size_gb,
+        ..Settings::default()
+    };
+    let repository = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?;
+    retention::preview(&*repository, draft.retention_policy(), chrono::Utc::now())
+        .map_err(|error| error.to_string())
+}
+
+/// Deletes the clips the saved limits call for, now.
+#[tauri::command]
+fn apply_retention(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<retention::SweepResult, String> {
+    let mut repository = state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?;
+    let policy = repository
+        .load_settings()
+        .map_err(|error| error.to_string())?
+        .retention_policy();
+    let result = retention::sweep(&mut *repository, policy, chrono::Utc::now())
+        .map_err(|error| error.to_string())?;
+    drop(repository);
+    if result.deleted > 0 {
+        let _ = app.emit("clips_changed", result.deleted);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn set_clip_favorite(
+    clip_id: openclip_core::ClipId,
+    favorite: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .repository
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())?
+        .set_clip_favorite(clip_id, favorite)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1120,6 +1178,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let gsi = Arc::new(GsiService::with_observer(repository.clone(), observer));
     let updates = start_updates(app.handle(), &repository, &gsi, &recorder);
     let diagnostics = start_diagnostics(app.handle(), &repository, &gsi, &recorder)?;
+    retention::start(app.handle().clone(), repository.clone())?;
     app.manage(AppState {
         repository,
         gsi: gsi.clone(),
@@ -1250,6 +1309,9 @@ pub fn run() {
             open_moment_clip,
             prepare_clip_media,
             prepare_manual_clip_media,
+            preview_retention,
+            apply_retention,
+            set_clip_favorite,
             get_pending_diagnostics,
             submit_diagnostics,
             dismiss_diagnostics,

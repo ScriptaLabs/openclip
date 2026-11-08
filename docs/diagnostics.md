@@ -35,7 +35,7 @@ Exactly the JSON shown in the preview (`ReportPayload`):
 
 - every file path (`C:\Users\<name>\Videos\…` becomes `<path>`), so account and folder names go;
 - the Windows user name, computer name and domain, by value, wherever they appear;
-- UUIDs, Steam IDs, email addresses, IPv4/IPv6 addresses (except `127.0.0.1`), tokens and long secrets;
+- UUIDs, Steam IDs, email addresses, every IP address, tokens and long secrets;
 - custom server map titles (`DE_MIRAGE | RETAKE #61 | …` becomes `<custom>`); engine map names stay.
 
 The report carries no install ID, account ID or anything that links one report to the next.
@@ -52,8 +52,15 @@ in the Supabase dashboard or with the service role.
   versions, encoders) for triage.
 - `status` (`new`, `investigating`, `fixed`, `wontfix`), `fixed_in` and `notes` are for us.
 
-Anyone holding the public key could still send junk reports; the size limits bound the cost. If that
-ever happens, put an Edge Function with rate limiting in front of the table.
+Anyone holding the public key could still send junk reports; the size limits bound the cost.
+`scripts/supabase/diagnostic_report_limits.sql` adds two optional protections, applied by hand: a cap of
+120 reports a minute, and a daily job that deletes fixed or won't-fix reports after 30 days and
+everything else after 180. If abuse ever becomes real, put an Edge Function with per-client rate
+limiting in front of the table.
+
+The graphics adapter's name and driver version are included on purpose, since many capture problems
+are specific to a card or driver. The preview lists them, and a note box reminds users to keep
+personal details out of what they type (the note is scrubbed too, but only for known patterns).
 
 ## Changing the schema
 

@@ -399,3 +399,22 @@ button { font-family: inherit; cursor: pointer; }
 .oc-diag-thanks { flex-direction: row; align-items: center; gap: 12px; }
 .oc-diag-thanks p { margin-top: 2px; }
 @media (prefers-reduced-motion: reduce) { .oc-diag { animation: none; } }
+
+/* Clip retention */
+.oc-retention { display: flex; flex-direction: column; gap: 14px; padding: 18px 0 4px; border-top: 1px solid var(--line); }
+.oc-retention-head strong { display: block; font-size: 14px; font-weight: 600; }
+.oc-retention-head small { display: block; margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.oc-retention-usage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, 0.03); color: var(--text-2); font-size: 13px; }
+.oc-retention-usage b { color: var(--text); font-weight: 600; }
+.oc-retention-usage svg { color: var(--gold); }
+.oc-retention-row { display: flex; flex-wrap: wrap; gap: 14px; }
+.oc-retention-row label { display: flex; flex: 1 1 200px; flex-direction: column; gap: 7px; color: var(--text-2); font-size: 12.5px; font-weight: 500; }
+.oc-retention-note, .oc-retention-warn { display: flex; align-items: flex-start; gap: 7px; margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.oc-retention-note svg { flex: none; margin-top: 3px; color: var(--gold); }
+.oc-retention-warn { padding: 10px 12px; border: 1px solid rgba(226, 123, 123, 0.3); border-radius: 10px; background: rgba(226, 123, 123, 0.08); color: #f0b4b4; }
+.oc-retention-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.oc-retention-message { color: var(--text-2); font-size: 12.5px; }
+.oc-btn.danger { border-color: transparent; background: var(--danger); color: #1c0a0a; font-weight: 600; }
+.oc-btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 88%, white); }
+
+.oc-diag-note small { color: var(--muted); font-size: 12px; font-weight: 400; }

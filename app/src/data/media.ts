@@ -60,8 +60,11 @@ export function loadClipMedia(clip: ClipKey): Promise<ClipMediaUrls> {
   return request;
 }
 
-export async function setMomentFavorite(matchId: string, momentId: string, favorite: boolean): Promise<void> {
-  if (isTauri()) await invoke("set_moment_favorite", { matchId, momentId, favorite });
+/** Stars a clip. Favorites are kept when old clips are cleaned up. */
+export async function setClipFavorite(clip: ClipKey, favorite: boolean): Promise<void> {
+  if (!isTauri()) return;
+  if (clip.source === "manual") await invoke("set_clip_favorite", { clipId: clip.id, favorite });
+  else await invoke("set_moment_favorite", { matchId: clip.matchId, momentId: clip.id, favorite });
 }
 
 export async function revealClip(clip: ClipKey): Promise<void> {

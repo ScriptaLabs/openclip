@@ -17,6 +17,7 @@ const CAPTURED_CLIPS_MIGRATION: &str = include_str!("../migrations/0002_captured
 const CLIP_ORIGINS_MIGRATION: &str = include_str!("../migrations/0003_clip_origins.sql");
 const RUSH_MODE_MIGRATION: &str = include_str!("../migrations/0004_rush_mode.sql");
 const ORIGIN_MIGRATION: &str = include_str!("../migrations/0005_match_origin.sql");
+const CLIP_FAVORITE_MIGRATION: &str = include_str!("../migrations/0006_clip_favorite.sql");
 
 pub struct SqliteRepository {
     connection: Connection,
@@ -56,22 +57,28 @@ impl SqliteRepository {
 {RUSH_MODE_MIGRATION}"
             ))
             .map_err(storage_error)?;
-        self.add_match_origin_column()
+        self.add_column_if_missing("matches", "origin", ORIGIN_MIGRATION)?;
+        self.add_column_if_missing("captured_clips", "is_favorite", CLIP_FAVORITE_MIGRATION)
     }
 
     /// SQLite cannot add a column only if it is missing, and migrations run on every start.
-    fn add_match_origin_column(&self) -> openclip_core::Result<()> {
+    fn add_column_if_missing(
+        &self,
+        table: &str,
+        column: &str,
+        migration: &str,
+    ) -> openclip_core::Result<()> {
         let present: i64 = self
             .connection
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('matches') WHERE name = 'origin'",
-                [],
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                [table, column],
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
         if present == 0 {
             self.connection
-                .execute_batch(ORIGIN_MIGRATION)
+                .execute_batch(migration)
                 .map_err(storage_error)?;
         }
         Ok(())
@@ -282,8 +289,11 @@ impl MatchRepository for SqliteRepository {
             .prepare(
                 "SELECT c.id, c.match_id, c.created_at, c.path, c.duration_ms, c.width, c.height,
                     c.frames_per_second, c.codec, c.encoder, c.has_game_audio,
-                    COALESCE(o.source, 'manual'), o.moment_id
-             FROM captured_clips c LEFT JOIN clip_origins o ON o.clip_id = c.id
+                    COALESCE(o.source, 'manual'), o.moment_id,
+                    COALESCE(m.is_favorite, c.is_favorite)
+             FROM captured_clips c
+             LEFT JOIN clip_origins o ON o.clip_id = c.id
+             LEFT JOIN moments m ON m.id = o.moment_id
              ORDER BY c.created_at DESC",
             )
             .map_err(storage_error)?;
@@ -306,11 +316,42 @@ impl MatchRepository for SqliteRepository {
                     source: parse_json_enum(row.get::<_, String>(11)?)?,
                     moment_id: parse_optional_uuid(row.get::<_, Option<String>>(12)?.as_deref())?
                         .map(MomentId),
+                    is_favorite: row.get(13)?,
                 })
             })
             .map_err(storage_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(storage_error)
+    }
+
+    fn set_clip_favorite(&mut self, clip_id: ClipId, favorite: bool) -> openclip_core::Result<()> {
+        self.connection
+            .execute(
+                "UPDATE captured_clips SET is_favorite = ?2 WHERE id = ?1",
+                params![clip_id.to_string(), favorite],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn delete_clip(&mut self, clip_id: ClipId) -> openclip_core::Result<()> {
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        // A moment is tied to its clip by the origin row (removed with the clip by ON DELETE
+        // CASCADE) and by the older `clips` table that saving a moment also writes.
+        transaction
+            .execute(
+                "DELETE FROM clips WHERE moment_id IN
+                 (SELECT moment_id FROM clip_origins WHERE clip_id = ?1)",
+                [clip_id.to_string()],
+            )
+            .map_err(storage_error)?;
+        transaction
+            .execute(
+                "DELETE FROM captured_clips WHERE id = ?1",
+                [clip_id.to_string()],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
     }
 
     fn load_settings(&self) -> openclip_core::Result<Settings> {
@@ -798,6 +839,7 @@ mod tests {
             codec: "h264".to_owned(),
             encoder: "nvenc".to_owned(),
             has_game_audio: true,
+            is_favorite: true,
         };
         let mut captured_moment = moment.clone();
         captured_moment.clip_id = Some(automatic_clip.id);
@@ -840,8 +882,107 @@ mod tests {
             codec: "h264".to_owned(),
             encoder: "nvenc".to_owned(),
             has_game_audio: true,
+            is_favorite: false,
         };
         repository.save_clip(&clip).expect("clip saves");
         assert_eq!(repository.list_clips().unwrap(), vec![clip]);
+    }
+
+    #[test]
+    fn a_manual_clip_can_be_a_favorite_and_deleting_a_clip_leaves_its_moment_without_video() {
+        let mut repository = SqliteRepository::in_memory().expect("database opens");
+        let manual = Clip {
+            id: ClipId::new(),
+            match_id: None,
+            moment_id: None,
+            source: openclip_core::ClipSource::Manual,
+            created_at: timestamp(1_500),
+            path: "clips/manual.mp4".into(),
+            duration_ms: 15_800,
+            width: 1_920,
+            height: 1_080,
+            frames_per_second: 60,
+            codec: "h264".to_owned(),
+            encoder: "nvenc".to_owned(),
+            has_game_audio: true,
+            is_favorite: false,
+        };
+        repository.save_clip(&manual).expect("clip saves");
+        repository
+            .set_clip_favorite(manual.id, true)
+            .expect("favorite saves");
+        assert!(repository.list_clips().unwrap()[0].is_favorite);
+
+        repository.delete_clip(manual.id).expect("clip deletes");
+        assert_eq!(repository.list_clips().unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_clip_made_from_a_moment_follows_the_moments_favorite_and_deleting_it_keeps_the_moment() {
+        let mut repository = SqliteRepository::in_memory().expect("database opens");
+        let session = GameSession {
+            id: GameSessionId::new(),
+            game: Game::CounterStrike2,
+            started_at: timestamp(1_000),
+            ended_at: None,
+        };
+        repository.save_session(&session).expect("session saves");
+        let game_match = Match {
+            id: MatchId::new(),
+            session_id: session.id,
+            map: Some("de_mirage".to_owned()),
+            mode: MatchMode::Competitive,
+            origin: openclip_core::MatchOrigin::Official,
+            started_at: timestamp(1_000),
+            ended_at: None,
+            score_team_a: None,
+            score_team_b: None,
+            rounds: Vec::new(),
+            moments: Vec::new(),
+        };
+        repository.save_match(&game_match).expect("match saves");
+        let moment_id = MomentId::new();
+        let clip = Clip {
+            id: ClipId::new(),
+            match_id: Some(game_match.id),
+            moment_id: Some(moment_id),
+            source: openclip_core::ClipSource::AutomaticMoment,
+            created_at: timestamp(1_600),
+            path: "clips/auto.mp4".into(),
+            duration_ms: 12_000,
+            width: 1_920,
+            height: 1_080,
+            frames_per_second: 60,
+            codec: "h264".to_owned(),
+            encoder: "nvenc".to_owned(),
+            has_game_audio: true,
+            is_favorite: false,
+        };
+        let moment = Moment {
+            id: moment_id,
+            match_id: game_match.id,
+            round_id: None,
+            start_offset_ms: 0,
+            end_offset_ms: 12_000,
+            events: Vec::new(),
+            classification: openclip_core::MomentClassification::Kill,
+            importance: 10.0,
+            clip_id: Some(clip.id),
+            clip_path: Some(clip.path.clone()),
+            is_favorite: true,
+        };
+        repository
+            .save_moment_with_clip(&moment, &clip)
+            .expect("moment and clip save");
+        assert!(
+            repository.list_clips().unwrap()[0].is_favorite,
+            "follows the moment"
+        );
+
+        repository.delete_clip(clip.id).expect("clip deletes");
+        let saved = repository.get_match(game_match.id).unwrap().unwrap();
+        assert_eq!(saved.moments.len(), 1, "the moment survives");
+        assert_eq!(saved.moments[0].clip_path, None, "but has no video");
+        assert!(saved.moments[0].is_favorite);
     }
 }

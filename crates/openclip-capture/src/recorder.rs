@@ -316,6 +316,7 @@ impl RecorderService {
                 .clone()
                 .unwrap_or_else(|| "unknown".to_owned()),
             has_game_audio: settings.capture_game_audio && media.has_audio,
+            is_favorite: false,
         })
     }
 

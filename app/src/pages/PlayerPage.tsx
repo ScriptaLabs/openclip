@@ -7,7 +7,7 @@ import { artworkForMap } from "../data/mapArtwork";
 import { ClipThumb } from "../components/ClipThumb";
 import { useClipMedia } from "../components/ClipCard";
 import { formatMode } from "../domain";
-import { loadClipMedia, revealClip, setMomentFavorite, type ClipMediaUrls } from "../data/media";
+import { loadClipMedia, revealClip, setClipFavorite, type ClipMediaUrls } from "../data/media";
 import { headshotIcon, weaponIcon } from "../lib/weapons";
 
 interface PlayerPageProps {
@@ -163,7 +163,7 @@ export function PlayerPage({ clip, clips, onBack, onSelect, onOpenMatch, onChang
     const next = !favorite;
     setFavorite(next);
     try {
-      await setMomentFavorite(clip.matchId, clip.id, next);
+      await setClipFavorite(clip, next);
       onChanged();
     } catch (error) {
       setFavorite(!next);
@@ -188,9 +188,9 @@ export function PlayerPage({ clip, clips, onBack, onSelect, onOpenMatch, onChang
       <div className="oc-player-top">
         <button className="oc-btn" onClick={onBack} type="button"><ChevronLeft size={16} /> Back</button>
         <div className="oc-actions">
-          {clip.source === "automatic" && <button aria-label={favorite ? "Remove from favorites" : "Add to favorites"} aria-pressed={favorite} className={`oc-icon-btn ${favorite ? "on" : ""}`} onClick={() => void toggleFavorite()} type="button">
+          <button aria-label={favorite ? "Remove from favorites" : "Add to favorites"} aria-pressed={favorite} className={`oc-icon-btn ${favorite ? "on" : ""}`} onClick={() => void toggleFavorite()} type="button">
             <Star fill={favorite ? "currentColor" : "none"} size={16} />
-          </button>}
+          </button>
           <button className="oc-btn" onClick={reveal} type="button"><FolderOpen size={16} /> Show in folder</button>
         </div>
       </div>

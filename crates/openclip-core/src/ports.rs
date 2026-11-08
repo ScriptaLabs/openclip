@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::{
-    Clip, GameEvent, GameSession, GameStateUpdate, Match, MatchId, Moment, RecordingStatus, Round,
-    Settings,
+    Clip, ClipId, GameEvent, GameSession, GameStateUpdate, Match, MatchId, Moment, RecordingStatus,
+    Round, Settings,
 };
 
 #[derive(Debug, Error)]
@@ -68,6 +68,10 @@ pub trait MatchRepository: Send {
     fn save_moment_with_clip(&mut self, moment: &Moment, clip: &Clip) -> Result<()>;
     fn save_clip(&mut self, clip: &Clip) -> Result<()>;
     fn list_clips(&self) -> Result<Vec<Clip>>;
+    /// Marks a manual replay as a favorite. A clip made from a moment follows that moment instead.
+    fn set_clip_favorite(&mut self, clip_id: ClipId, favorite: bool) -> Result<()>;
+    /// Forgets a clip whose file was deleted. Its moment stays, without video.
+    fn delete_clip(&mut self, clip_id: ClipId) -> Result<()>;
     fn load_settings(&self) -> Result<Settings>;
     fn save_settings(&mut self, settings: &Settings) -> Result<()>;
     fn apply_game_update(&mut self, update: &GameStateUpdate) -> Result<()>;

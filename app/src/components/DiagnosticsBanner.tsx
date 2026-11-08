@@ -56,7 +56,10 @@ export function DiagnosticsBanner({ report, onNeverAsk, onDone }: DiagnosticsBan
     );
   }
 
-  const gpu = payload.gpus.filter((adapter) => !adapter.software).map((adapter) => adapter.name)[0];
+  const adapter = payload.gpus.find((candidate) => !candidate.software);
+  const gpu = adapter
+    ? `${adapter.name}${adapter.driverVersion ? `, driver ${adapter.driverVersion}` : ""}`
+    : null;
   const included = [
     `OpenClip ${payload.app_version}`,
     payload.os,
@@ -94,6 +97,7 @@ export function DiagnosticsBanner({ report, onNeverAsk, onDone }: DiagnosticsBan
           </details>
           <label className="oc-diag-note">
             <span>Anything to add? <em>Optional</em></span>
+            <small>Please leave out passwords, usernames and other personal details.</small>
             <textarea
               maxLength={1000}
               onChange={(event) => setNote(event.target.value)}

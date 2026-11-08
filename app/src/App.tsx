@@ -88,6 +88,7 @@ function App() {
       // The capture confirmation itself is shown by the overlay window, not in this window.
       void listen("automatic_moment_finalized", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
       void listen("replay_saved", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
+      void listen("clips_changed", () => void refresh(isActive)).then((stop) => { unlisten.push(stop); });
       void listen<PendingReport>("diagnostics_pending", (event) => setReport(event.payload)).then((stop) => { unlisten.push(stop); });
       void getPendingDiagnostics().then(setReport).catch(() => {});
     } else if (new URLSearchParams(window.location.search).has("diagnostics")) {
